@@ -7,6 +7,7 @@ import time
 import re
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor  # --- 新增：导入线程池模块 ---
 from google import genai
 from google.genai import types
 from openai import OpenAI
@@ -14,39 +15,37 @@ from openai import OpenAI
 # --- 常量与文件路径 ---
 CONFIG_FILE = "user_input.json"
 
+
 class AgentWorkflow:
     def __init__(self, config, log_callback):
         self.config = config
         self.log = log_callback
         self.key_index = 0
-        self.fallback_key_index = 0  # 备用 API Key 的轮询索引
+        self.fallback_key_index = 0
         self.is_paused = False
         self.is_running = False
 
-        # --- 新增：动态生成书名专属文件夹和对应路径 ---
+        # --- 新增：API Key 轮询的线程锁，防止并发抢夺导致报错 ---
+        self.key_lock = threading.Lock()
+
         raw_title = self.config.get("book_title", "未命名小说").strip()
-        # 替换掉可能导致路径创建失败的特殊字符
         self.book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title)
         if not self.book_title:
             self.book_title = "未命名小说"
 
-        # 生成 BOOKS/书名/ 目录结构
         self.book_dir = os.path.join("BOOKS", self.book_title)
         os.makedirs(self.book_dir, exist_ok=True)
 
-        # 动态绑定当前书籍的文件路径
         self.full_volume_file = os.path.join(self.book_dir, f"{self.book_title}_full_volume.txt")
         self.compressed_volume_file = os.path.join(self.book_dir, f"{self.book_title}_compressed_volume.txt")
         self.state_file = os.path.join(self.book_dir, f"{self.book_title}_state.json")
 
-        # 运行时状态
         self.full_volume = ""
         self.compressed_volume = ""
         self.current_chapter = 1
         self.load_local_data()
 
     def load_local_data(self):
-        """加载本地保存的完整卷和压缩卷，并恢复章节进度"""
         if os.path.exists(self.full_volume_file):
             with open(self.full_volume_file, "r", encoding="utf-8") as f:
                 self.full_volume = f.read()
@@ -71,7 +70,6 @@ class AgentWorkflow:
             self.current_chapter = 1
 
     def save_local_data(self):
-        """保存完整卷、压缩卷和章节进度到本地"""
         with open(self.full_volume_file, "w", encoding="utf-8") as f:
             f.write(self.full_volume)
         with open(self.compressed_volume_file, "w", encoding="utf-8") as f:
@@ -84,7 +82,6 @@ class AgentWorkflow:
             self.log(f"⚠️ 保存进度文件失败: {e}")
 
     def call_llm(self, prompt, role="Agent", retry_count=0, use_fallback=False):
-        """调用LLM，包含降级审核、重试、备用API切换、人设注入和休眠逻辑"""
         while getattr(self, 'is_paused', False):
             time.sleep(1)
             if getattr(self, 'is_running', False) is False: return None
@@ -103,20 +100,21 @@ class AgentWorkflow:
             prefix_log = ""
 
         content_level = self.config.get("content_level", "Normal")
-
-        self.log(f"[{role}] {prefix_log}正在思考... (Model: {model_name} | Type: {api_type} | Level: {content_level})")
+        self.log(f"[{role}] {prefix_log}正在思考... (Model: {model_name})")
 
         try:
             api_keys = [k.strip() for k in api_keys_str.split(",") if k.strip()]
             if not api_keys:
                 raise ValueError(f"未配置{'备用' if use_fallback else '主'} API Keys")
 
-            if use_fallback:
-                key = api_keys[self.fallback_key_index % len(api_keys)]
-                self.fallback_key_index += 1
-            else:
-                key = api_keys[self.key_index % len(api_keys)]
-                self.key_index += 1
+            # --- 新增：对 API Key 的轮询获取进行加锁保护 ---
+            with self.key_lock:
+                if use_fallback:
+                    key = api_keys[self.fallback_key_index % len(api_keys)]
+                    self.fallback_key_index += 1
+                else:
+                    key = api_keys[self.key_index % len(api_keys)]
+                    self.key_index += 1
 
             global_prompt = self.config.get("global_prompt", "").strip()
             if global_prompt:
@@ -144,12 +142,10 @@ class AgentWorkflow:
                     types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
                     types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
                 ]
-
                 config = types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     safety_settings=safety_settings
                 )
-
                 contents = []
                 if not is_tool_agent:
                     if content_level == "R18":
@@ -172,7 +168,6 @@ class AgentWorkflow:
                 candidate = response.candidates[0]
                 if candidate.finish_reason and "STOP" not in str(candidate.finish_reason):
                     raise ValueError(f"内容生成异常终止，原因: {candidate.finish_reason}")
-
                 text = response.text
 
             elif api_type == "OpenAI Compatible":
@@ -180,7 +175,6 @@ class AgentWorkflow:
                 if api_url:
                     client_kwargs["base_url"] = api_url
                 client = OpenAI(**client_kwargs)
-
                 messages = [{"role": "system", "content": system_instruction}]
 
                 if not is_tool_agent:
@@ -192,24 +186,21 @@ class AgentWorkflow:
                         messages.append({"role": "assistant", "content": model_intro_r16})
 
                 messages.append({"role": "user", "content": final_prompt})
-
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=messages
                 )
                 text = response.choices[0].message.content
-
             else:
                 raise ValueError(f"未知的 API 类型: {api_type}")
 
             if not text:
                 raise ValueError("API返回了空文本")
-
             if use_fallback:
                 text += "\n❤"
 
-            self.log(f"[{role}] {prefix_log}回复完成:\n{text}\n" + "-" * 50)
-            time.sleep(2)
+            self.log(f"[{role}] {prefix_log}回复完成:\n{text[:50]}...\n" + "-" * 50)  # 为日志整洁，截断回复回显
+            time.sleep(1)  # 并发时减少硬性睡眠等待
             return text
 
         except Exception as e:
@@ -235,9 +226,6 @@ class AgentWorkflow:
                     self.log(f"[{role}] ⛔ 备用API也已连续5次调用失败！工作流已彻底暂停。")
 
             self.is_paused = True
-            pause_cb = getattr(self, 'pause_callback', None)
-            if pause_cb:
-                pause_cb(True)
             while getattr(self, 'is_paused', False):
                 time.sleep(1)
                 if getattr(self, 'is_running', False) is False: return None
@@ -270,49 +258,68 @@ class AgentWorkflow:
             level_prefix = ""
 
         while self.is_running:
+            # --- 并发处理阶段 1: 多个设计者同时制定计划 ---
             self.log(f"\n--- 步骤 1: 设计者制定总体开发计划 (第 {self.current_chapter} 章) ---")
             designer_count = int(self.config.get("designer_count", 1))
             plans = []
-            for i in range(designer_count):
-                prompt = f"{level_prefix}你是小说剧情的设计者，负责制定新剧情。大纲：{outline}。风格：{style}。人物：{chars}。请为当前第{self.current_chapter}章及后续章节制定剧情发展计划，每章需>2000字且结尾留有悬念。"
-                plan = self.call_llm(prompt, f"设计者 {i + 1}")
-                plans.append(plan)
 
+            with ThreadPoolExecutor(max_workers=max(1, designer_count)) as executor:
+                futures = []
+                for i in range(designer_count):
+                    prompt = f"{level_prefix}你是小说剧情的设计者，负责制定新剧情。大纲：{outline}。风格：{style}。人物：{chars}。请为当前第{self.current_chapter}章及后续章节制定剧情发展计划，每章需>2000字且结尾留有悬念。"
+                    futures.append(executor.submit(self.call_llm, prompt, f"设计者 {i + 1}"))
+                # 等待所有设计者完成工作
+                plans = [f.result() for f in futures]
+
+            # --- 并发处理阶段 2: 多个评审者给所有计划打分 ---
             self.log("\n--- 步骤 2: 评审者选出最佳开发计划 ---")
-            reviewer_count = int(self.config.get("reviewer_count", 1))
             best_plan = plans[0]
             if len(plans) > 1:
                 highest_score = -1
-                for plan in plans:
-                    score_prompt = f"{level_prefix}你是评审者。请对以下剧情计划打分(0-100)。只输出：'分数: X'。\n计划：{plan}"
-                    res = self.call_llm(score_prompt, "评审者(计划)")
-                    score = self.extract_score(res)
-                    if score > highest_score:
-                        highest_score = score
-                        best_plan = plan
+                with ThreadPoolExecutor(max_workers=len(plans)) as executor:
+                    futures = []
+                    for plan in plans:
+                        score_prompt = f"{level_prefix}你是评审者。请对以下剧情计划打分(0-100)。只输出：'分数: X'。\n计划：{plan}"
+                        futures.append(executor.submit(self.call_llm, score_prompt, "评审者(计划)"))
+
+                    for i, future in enumerate(futures):
+                        score = self.extract_score(future.result())
+                        if score > highest_score:
+                            highest_score = score
+                            best_plan = plans[i]
             self.log("已选定最佳开发计划。")
 
-            self.log("\n--- 步骤 3 & 4: 开发者编写章节并自验证 ---")
+            # --- 并发处理阶段 3 & 4: 多个开发者同时写这一章的不同版本 ---
+            self.log("\n--- 步骤 3 & 4: 开发者并发编写章节并自验证 ---")
             dev_count = int(self.config.get("developer_count", 1))
             chapters = []
-            for i in range(dev_count):
-                prompt = f"{level_prefix}你是开发者。请根据以下计划编写第{self.current_chapter}章的正文内容（不少于2000字）。\n历史摘要：{self.compressed_volume}\n开发计划：{best_plan}\n写完后请自行验证并输出修改后的最终版。"
-                chapter_text = self.call_llm(prompt, f"开发者 {i + 1}")
-                chapters.append(chapter_text)
+            with ThreadPoolExecutor(max_workers=max(1, dev_count)) as executor:
+                futures = []
+                for i in range(dev_count):
+                    prompt = f"{level_prefix}你是开发者。请根据以下计划编写第{self.current_chapter}章的正文内容（不少于2000字）。\n历史摘要：{self.compressed_volume}\n开发计划：{best_plan}\n写完后请自行验证并输出修改后的最终版。"
+                    futures.append(executor.submit(self.call_llm, prompt, f"开发者 {i + 1}"))
+                chapters = [f.result() for f in futures]
 
+            # --- 并发处理阶段 5 & 6: 评审者并发为所有开发者的版本打分 ---
             self.log("\n--- 步骤 5 & 6: 评审者评分并提出检视意见 ---")
             best_chapter = chapters[0]
             best_dev_index = 0
             highest_score = -1
-            for i, chapter in enumerate(chapters):
-                score_prompt = f"{level_prefix}你是评审者。请对以下章节进行严格客观的打分(0-100)。输出'分数: X'。\n章节内容：{chapter}"
-                res = self.call_llm(score_prompt, f"评审者(打分 开发者{i + 1})")
-                score = self.extract_score(res)
-                if score > highest_score:
-                    highest_score = score
-                    best_chapter = chapter
-                    best_dev_index = i
 
+            with ThreadPoolExecutor(max_workers=len(chapters)) as executor:
+                futures = []
+                for i, chapter in enumerate(chapters):
+                    score_prompt = f"{level_prefix}你是评审者。请对以下章节进行严格客观的打分(0-100)。输出'分数: X'。\n章节内容：{chapter}"
+                    futures.append(executor.submit(self.call_llm, score_prompt, f"评审者(打分 开发者{i + 1})"))
+
+                for i, future in enumerate(futures):
+                    score = self.extract_score(future.result())
+                    if score > highest_score:
+                        highest_score = score
+                        best_chapter = chapters[i]
+                        best_dev_index = i
+
+            # （生成检视意见为单点任务，不需要并发）
             feedback_prompt = f"{level_prefix}你是评审者。请对以下选出的最高分章节提出需要修改的检视意见。\n章节内容：{best_chapter}"
             feedback = self.call_llm(feedback_prompt, "评审者(检视意见)")
 
@@ -341,24 +348,32 @@ class AgentWorkflow:
             clean_chapter = clean_chapter.strip() if clean_chapter else best_chapter.strip()
             self.full_volume += f"\n\n第{self.current_chapter}章\n{clean_chapter}"
 
-            self.log("\n--- 步骤 10 & 11: 压缩者生成摘要并评审 ---")
+            # --- 并发处理阶段 10 & 11: 多个压缩者同时生成不同版本的摘要 ---
+            self.log("\n--- 步骤 10 & 11: 压缩者并发生成摘要并评审 ---")
             comp_count = int(self.config.get("compressor_count", 1))
             summaries = []
-            for i in range(comp_count):
-                comp_prompt = f"你是压缩者。请对以下最新一章内容进行剧情压缩概括。【严格指令】：只提取故事主线剧情发展、人物行动和核心事件。绝对不要包含任何身体特征描写、暧昧擦边、性暗示或环境渲染。用像新闻报道一样极度客观、理智、干燥的语言输出：\n{best_chapter}"
-                summary = self.call_llm(comp_prompt, f"压缩者 {i + 1}")
-                summaries.append(summary)
+
+            with ThreadPoolExecutor(max_workers=max(1, comp_count)) as executor:
+                futures = []
+                for i in range(comp_count):
+                    comp_prompt = f"你是压缩者。请对以下最新一章内容进行剧情压缩概括。【严格指令】：只提取故事主线剧情发展、人物行动和核心事件。绝对不要包含任何身体特征描写、暧昧擦边、性暗示或环境渲染。用像新闻报道一样极度客观、理智、干燥的语言输出：\n{best_chapter}"
+                    futures.append(executor.submit(self.call_llm, comp_prompt, f"压缩者 {i + 1}"))
+                summaries = [f.result() for f in futures]
 
             best_summary = summaries[0]
             if len(summaries) > 1:
                 highest_score = -1
-                for summary in summaries:
-                    score_prompt = f"{level_prefix}你是评审者。请对剧情摘要打分(0-100)。输出'分数: X'。\n摘要：{summary}"
-                    res = self.call_llm(score_prompt, "评审者(压缩评分)")
-                    score = self.extract_score(res)
-                    if score > highest_score:
-                        highest_score = score
-                        best_summary = summary
+                with ThreadPoolExecutor(max_workers=len(summaries)) as executor:
+                    futures = []
+                    for summary in summaries:
+                        score_prompt = f"{level_prefix}你是评审者。请对剧情摘要打分(0-100)。输出'分数: X'。\n摘要：{summary}"
+                        futures.append(executor.submit(self.call_llm, score_prompt, "评审者(压缩评分)"))
+
+                    for i, future in enumerate(futures):
+                        score = self.extract_score(future.result())
+                        if score > highest_score:
+                            highest_score = score
+                            best_summary = summaries[i]
 
             self.log("\n--- 步骤 12: 清洗者提取纯净摘要并合入压缩卷 ---")
             cleaner_prompt_summary = f"你是清洗者。你的唯一任务是提取文本中的纯净剧情摘要。去除AI寒暄等多余内容。只输出纯粹的剧情概括文本：\n\n{best_summary}"
@@ -391,12 +406,12 @@ class AgentWorkflow:
 class NovelGeneratorGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("自闭环AI小说生成器")
+        self.root.title("自闭环AI小说生成器 (并发加速版)")
         self.root.geometry("850x750")
 
         self.workflow = None
         self.thread = None
-        self.current_log_file = None  # 新增：用于记录动态的当前日志文件路径
+        self.current_log_file = None
         self.create_widgets()
         self.load_config()
 
@@ -421,7 +436,6 @@ class NovelGeneratorGUI:
         self.build_log_tab(log_frame)
 
     def build_input_tab(self, frame):
-        # --- 新增：书名输入框 ---
         ttk.Label(frame, text="书名 (必选):").grid(row=0, column=0, sticky='w', pady=(5, 0))
         self.book_title_var = tk.StringVar()
         ttk.Entry(frame, textvariable=self.book_title_var, width=50).grid(row=0, column=1, sticky='w', pady=(5, 0))
@@ -475,7 +489,6 @@ class NovelGeneratorGUI:
             self.agent_vars[role_key] = {"count": count_var, "prompt": prompt_var}
 
     def build_api_tab(self, frame):
-        # --- 主 API 配置区 ---
         ttk.Label(frame, text="【主 API 配置】", font=('bold')).grid(row=0, column=0, columnspan=2, sticky='w',
                                                                    pady=(5, 0))
         ttk.Label(frame, text="API 类型:").grid(row=1, column=0, sticky='w', pady=2)
@@ -500,10 +513,8 @@ class NovelGeneratorGUI:
         self.api_model_cb.pack(side='left', padx=(0, 5))
         ttk.Button(model_frame, text="获取模型", command=lambda: self.fetch_models(is_fallback=False)).pack(side='left')
 
-        # 分割线
         ttk.Separator(frame, orient='horizontal').grid(row=9, column=0, columnspan=2, sticky='ew', pady=10)
 
-        # --- 备用 API 配置区 ---
         ttk.Label(frame, text="【备用 API 配置 (可选) - 当主API连续失败5次后临时接管】", font=('bold'),
                   foreground='gray').grid(row=10, column=0, columnspan=2, sticky='w', pady=(5, 0))
         ttk.Label(frame, text="备用 API 类型:").grid(row=11, column=0, sticky='w', pady=2)
@@ -532,7 +543,6 @@ class NovelGeneratorGUI:
             side='left')
 
     def fetch_models(self, is_fallback=False):
-        """自动请求对应接口的可用模型列表"""
         api_type = self.fallback_api_type_var.get() if is_fallback else self.api_type_var.get()
         url_str = self.fallback_api_url_var.get().strip() if is_fallback else self.api_url_var.get().strip()
         keys_str = self.fallback_api_keys_var.get().strip() if is_fallback else self.api_keys_var.get().strip()
@@ -547,26 +557,21 @@ class NovelGeneratorGUI:
             models = []
             try:
                 if api_type == "Gemini":
-                    # Gemini REST 获取模型
                     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
                     req = urllib.request.Request(endpoint)
                     with urllib.request.urlopen(req, timeout=10) as response:
                         data = json.loads(response.read().decode('utf-8'))
                         models = [m['name'].replace('models/', '') for m in data.get('models', []) if 'name' in m]
-
                 elif api_type == "OpenAI Compatible":
-                    # OpenAI 标准接口获取模型
                     base_url = url_str.rstrip('/')
                     endpoint = f"{base_url}/models"
                     headers = {"Authorization": f"Bearer {api_key}"}
                     req = urllib.request.Request(endpoint, headers=headers)
-
                     try:
                         with urllib.request.urlopen(req, timeout=10) as response:
                             data = json.loads(response.read().decode('utf-8'))
                             models = [m['id'] for m in data.get('data', []) if 'id' in m]
                     except urllib.error.HTTPError as e:
-                        # 尝试添加 /v1 路径
                         if e.code == 404 and not base_url.endswith('/v1'):
                             endpoint = f"{base_url}/v1/models"
                             req = urllib.request.Request(endpoint, headers=headers)
@@ -575,29 +580,23 @@ class NovelGeneratorGUI:
                                 models = [m['id'] for m in data.get('data', []) if 'id' in m]
                         else:
                             raise e
-
                 self.root.after(0, self.update_model_combobox, models, is_fallback)
-
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("获取失败",
                                                                 f"无法获取模型列表，请检查网络、URL或API Key:\n{str(e)}"))
 
-        # 开个子线程去拉取，防止界面卡死
         threading.Thread(target=fetch_task, daemon=True).start()
 
     def update_model_combobox(self, models, is_fallback):
-        """将获取到的模型列表更新至 UI"""
         if not models:
             messagebox.showinfo("提示", "该 API 端点返回了空的模型列表。")
             return
-
         if is_fallback:
             self.fallback_api_model_cb['values'] = models
             self.fallback_api_model_cb.set(models[0])
         else:
             self.api_model_cb['values'] = models
             self.api_model_cb.set(models[0])
-
         messagebox.showinfo("获取成功", f"成功获取 {len(models)} 个可用模型，已更新下拉列表！")
 
     def build_log_tab(self, frame):
@@ -625,27 +624,30 @@ class NovelGeneratorGUI:
                 text_widget.insert(tk.END, content)
 
     def log_message(self, message):
-        self.log_text.config(state='normal')
-        self.log_text.insert(tk.END, message + "\n")
+        # --- 新增：利用 Tkinter 的 after 保证多线程执行时的 UI 与文件写入的安全 ---
+        def _safe_log():
+            self.log_text.config(state='normal')
+            self.log_text.insert(tk.END, message + "\n")
 
-        lines = int(self.log_text.index('end-1c').split('.')[0])
-        if lines > 2000:
-            self.log_text.delete('1.0', f'{lines - 2000}.0')
+            lines = int(self.log_text.index('end-1c').split('.')[0])
+            if lines > 2000:
+                self.log_text.delete('1.0', f'{lines - 2000}.0')
 
-        self.log_text.see(tk.END)
-        self.log_text.config(state='disabled')
+            self.log_text.see(tk.END)
+            self.log_text.config(state='disabled')
 
-        # --- 变动：动态写入属于当前书名的日志 ---
-        if self.current_log_file:
-            try:
-                with open(self.current_log_file, "a", encoding="utf-8") as f:
-                    f.write(message + "\n")
-            except Exception as e:
-                pass
+            if self.current_log_file:
+                try:
+                    with open(self.current_log_file, "a", encoding="utf-8") as f:
+                        f.write(message + "\n")
+                except Exception as e:
+                    pass
+
+        self.root.after(0, _safe_log)
 
     def get_config_dict(self):
         return {
-            "book_title": self.book_title_var.get().strip(),  # --- 新增存入书籍名称 ---
+            "book_title": self.book_title_var.get().strip(),
             "api_type": self.api_type_var.get(),
             "content_level": self.content_level_var.get(),
             "global_prompt": self.global_prompt_text.get(1.0, tk.END).strip(),
@@ -655,12 +657,10 @@ class NovelGeneratorGUI:
             "api_keys": self.api_keys_var.get(),
             "api_url": self.api_url_var.get(),
             "api_model": self.api_model_var.get(),
-
             "fallback_api_type": self.fallback_api_type_var.get(),
             "fallback_api_keys": self.fallback_api_keys_var.get(),
             "fallback_api_url": self.fallback_api_url_var.get(),
             "fallback_api_model": self.fallback_api_model_var.get(),
-
             "designer_count": self.agent_vars["设计者"]["count"].get(),
             "developer_count": self.agent_vars["开发者"]["count"].get(),
             "reviewer_count": self.agent_vars["评审者"]["count"].get(),
@@ -679,10 +679,8 @@ class NovelGeneratorGUI:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 config = json.load(f)
-
-                self.book_title_var.set(config.get("book_title", ""))  # --- 新增读取书籍名称 ---
+                self.book_title_var.set(config.get("book_title", ""))
                 self.api_type_var.set(config.get("api_type", "Gemini"))
-
                 if "content_level" in config:
                     self.content_level_var.set(config["content_level"])
                 else:
@@ -714,12 +712,10 @@ class NovelGeneratorGUI:
                     if role == "清洗者": vals["count"].set(config.get("cleaner_count", "1"))
 
     def start_generation(self):
-        # --- 新增书名判空逻辑 ---
         raw_title = self.book_title_var.get().strip()
         if not raw_title:
             messagebox.showerror("错误", "书名不能为空！")
             return
-
         if not self.api_keys_var.get().strip():
             messagebox.showerror("错误", "主 API Keys 不能为空！")
             return
@@ -727,7 +723,6 @@ class NovelGeneratorGUI:
             messagebox.showerror("错误", "剧情大纲不能为空！")
             return
 
-        # 在界面侧也生成目录结构，确保开始记录 Log 时目录已存在
         safe_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title)
         book_dir = os.path.join("BOOKS", safe_title)
         os.makedirs(book_dir, exist_ok=True)
