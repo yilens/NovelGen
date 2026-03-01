@@ -6,6 +6,7 @@ import os
 import re
 import urllib.request
 import urllib.error
+import time
 from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from google.genai import types
@@ -20,16 +21,12 @@ class AgentWorkflow:
     def __init__(self, config, log_callback):
         self.config = config
         self.log = log_callback
-
         self.key_index = 0
         self.fallback_key_index = 0
         self.key_lock = threading.Lock()
-
-        # 使用 Event 替代轮询 sleep，提升性能与响应速度
         self.run_event = threading.Event()
         self.run_event.set()  # 初始状态为运行
         self.is_running = False
-
         self._init_directories()
         self._load_local_data()
 
@@ -38,6 +35,10 @@ class AgentWorkflow:
         self.book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title) or "未命名小说"
         self.book_dir = os.path.join("BOOKS", self.book_title)
         os.makedirs(self.book_dir, exist_ok=True)
+
+        # 初始化错误日志存储目录
+        self.err_dir = os.path.join(self.book_dir, "err")
+        os.makedirs(self.err_dir, exist_ok=True)
 
         self.full_volume_file = os.path.join(self.book_dir, f"{self.book_title}_full_volume.txt")
         self.compressed_volume_file = os.path.join(self.book_dir, f"{self.book_title}_compressed_volume.txt")
@@ -73,6 +74,37 @@ class AgentWorkflow:
                 json.dump({"completed_chapters": self.current_chapter}, f)
         except Exception as e:
             self.log(f"⚠️ 保存进度文件失败: {e}")
+
+    # 保存失败的请求信息到本地的方法
+    def _save_error_log(self, role, conf, sys_inst, is_tool, model_intro, final_prompt, history_text, error_msg):
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        safe_role = re.sub(r'[\\/:*?"<>| ]', '_', role)
+        err_filename = f"err_{timestamp}_{safe_role}.txt"
+        err_filepath = os.path.join(self.err_dir, err_filename)
+
+        try:
+            with open(err_filepath, "w", encoding="utf-8") as f:
+                f.write(f"=== 异常请求记录 ===\n")
+                f.write(f"发生时间: {timestamp}\n")
+                f.write(f"报错信息: {error_msg}\n")
+                f.write(f"模型配置: {conf['model_name']} ({conf['api_type']})\n")
+                f.write("-" * 50 + "\n")
+                f.write(f"【系统指令 (System Instruction)】:\n{sys_inst}\n\n")
+                f.write("-" * 50 + "\n")
+
+                f.write(f"【预设对话结构 (Roleplay Intro)】:\n")
+                if not is_tool:
+                    f.write("User: 自我介绍一下。\n")
+                    f.write(f"Model: {model_intro}\n\n")
+                else:
+                    f.write("(当前角色为工具型Agent，跳过自我介绍)\n\n")
+                f.write("-" * 50 + "\n")
+
+                f.write(f"【前情提要 (History Text)】:\n{history_text}\n\n")
+                f.write("-" * 50 + "\n")
+                f.write(f"【用户提示词 (User Prompt)】:\n{final_prompt}\n")
+        except Exception as e:
+            self.log(f"⚠️ 无法保存错误请求日志到 err 文件夹: {e}")
 
     def pause(self):
         self.run_event.clear()
@@ -112,7 +144,6 @@ class AgentWorkflow:
         base_role = role.split()[0].split('(')[0]
         is_tool_agent = "清洗者" in role or "压缩者" in role
 
-        # 🌟 修改点：只给“开发者”附加具体的写作风格提示
         custom_style = self.config.get("custom_style_prompt", "").strip()
         is_developer = "开发者" in role
         style_suffix = f" 这是我的写作风格：\n{custom_style}" if (custom_style and is_developer) else ""
@@ -147,7 +178,7 @@ class AgentWorkflow:
         self.log(f"[{role}] {conf['log_prefix']}正在思考... (Model: {conf['model_name']})")
 
         global_prompt = self.config.get("global_prompt", "").strip()
-        final_prompt = f"【系统补充指令】：\n{global_prompt}\n\n【当前具体任务】：\n{prompt}" if global_prompt else prompt
+        final_prompt = f"\n{global_prompt}\n\n【当前具体任务】：\n{prompt}" if global_prompt else prompt
 
         content_level = self.config.get("content_level", "Normal")
         is_tool, sys_inst, model_intro = self._build_system_instructions(role, content_level)
@@ -181,9 +212,13 @@ class AgentWorkflow:
 
             except Exception as e:
                 self.log(f"[{role}] {conf['log_prefix']}❌ API调用异常: {e}")
+
+                # 请求失败时保存暂存的请求信息
+                self._save_error_log(role, conf, sys_inst, is_tool, model_intro, final_prompt, history_text, str(e))
+
                 if attempt < MAX_API_RETRIES - 1:
                     self.log(f"[{role}] 🔄 准备第 {attempt + 2} 次重试...")
-                    self.run_event.wait(2)  # 相当于 sleep(2) 但可被中断
+                    self.run_event.wait(2)
 
         # 主 API 尝试满 5 次均失败
         if not use_fallback:
@@ -220,7 +255,6 @@ class AgentWorkflow:
             contents.append(types.Content(role="user", parts=[types.Part.from_text(text="自我介绍一下。")]))
             contents.append(types.Content(role="model", parts=[types.Part.from_text(text=model_intro)]))
 
-        # 🌟 新增：注入历史摘要作为聊天记录（如果存在）
         if history_text and history_text.strip():
             contents.append(types.Content(role="user", parts=[
                 types.Part.from_text(text="回顾一下之前的剧情。")]))
@@ -249,7 +283,6 @@ class AgentWorkflow:
             messages.append({"role": "user", "content": "自我介绍一下。"})
             messages.append({"role": "assistant", "content": model_intro})
 
-        # 🌟 新增：注入历史摘要作为聊天记录（如果存在）
         if history_text and history_text.strip():
             messages.append({"role": "user", "content": "你之前写了哪些剧情？请在接下来的任务中牢记这些前置剧情。"})
             messages.append({"role": "assistant",
@@ -266,7 +299,6 @@ class AgentWorkflow:
         return int(match.group(1)) if match else 50
 
     def _execute_parallel(self, max_workers, count, func, args_generator):
-        """提取的通用并发执行器"""
         results = []
         with ThreadPoolExecutor(max_workers=max(1, min(max_workers, count))) as executor:
             futures = [executor.submit(func, *args_generator(i)) for i in range(count)]
@@ -298,7 +330,6 @@ class AgentWorkflow:
 
         def plan_args(i):
             prompt = f"{level_prefix}你是小说剧情的设计者。大纲：{self.config.get('outline', '')}。风格：{self.config.get('style', '')}。人物：{self.config.get('characters', '')}。请为当前第{self.current_chapter}章及后续章节制定剧情发展计划，每章需>2000字且结尾留有悬念。"
-            # 🌟 新增：传递第四个参数 history_text
             return (prompt, f"设计者 {i + 1}", False, self.compressed_volume)
 
         plans = self._execute_parallel(designer_count, designer_count, self.call_llm, plan_args)
@@ -327,14 +358,12 @@ class AgentWorkflow:
         dev_count = int(self.config.get("developer_count", 1))
 
         def dev_args(i):
-            # 🌟 修改：移除写在 Prompt 中的历史摘要，改为通过 history_text 变量传给 API 对话记录
             prompt = f"{level_prefix}你是开发者。请根据以下计划编写第{self.current_chapter}章正文（>2000字）。\n开发计划：{self.best_plan}\n写完请自验证并输出修改后的最终版。"
             return (prompt, f"开发者 {i + 1}", False, self.compressed_volume)
 
         chapters = self._execute_parallel(dev_count, dev_count, self.call_llm, dev_args)
         if not chapters or not self.is_running: return False
 
-        # ... 后续原封不动 ... (直接保留你原来的代码)
         self.log("\n--- 步骤 5 & 6: 评审者评分并提出检视意见 ---")
         best_chapter, highest_score, best_dev_idx = chapters[0], -1, 0
 
@@ -507,7 +536,6 @@ class NovelGeneratorGUI:
         frame = ttk.Frame(notebook)
         notebook.add(frame, text="API 配置")
 
-        # 辅助构建 UI 的内部函数，保持 UI 代码干净
         def build_section(start_row, title, is_fallback=False):
             prefix = "fallback_" if is_fallback else ""
 
