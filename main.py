@@ -9,20 +9,10 @@ import urllib.request
 import urllib.error
 from google import genai
 from google.genai import types
-
-# 引入 openai 库以支持兼容接口
-try:
-    from openai import OpenAI
-except ImportError:
-    messagebox.showwarning("缺少依赖", "未检测到 openai 库。如需使用 OpenAI 兼容接口，请运行 'pip install openai'")
+from openai import OpenAI
 
 # --- 常量与文件路径 ---
 CONFIG_FILE = "user_input.json"
-FULL_VOLUME_FILE = "full_volume.txt"
-COMPRESSED_VOLUME_FILE = "compressed_volume.txt"
-STATE_FILE = "state.json"  # 专门记录运行状态和进度的文件
-RUN_LOG_FILE = "agent_run_log.txt"  # 新增：完整运行日志文件，用于防止内存溢出时查看
-
 
 class AgentWorkflow:
     def __init__(self, config, log_callback):
@@ -33,6 +23,22 @@ class AgentWorkflow:
         self.is_paused = False
         self.is_running = False
 
+        # --- 新增：动态生成书名专属文件夹和对应路径 ---
+        raw_title = self.config.get("book_title", "未命名小说").strip()
+        # 替换掉可能导致路径创建失败的特殊字符
+        self.book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title)
+        if not self.book_title:
+            self.book_title = "未命名小说"
+
+        # 生成 BOOKS/书名/ 目录结构
+        self.book_dir = os.path.join("BOOKS", self.book_title)
+        os.makedirs(self.book_dir, exist_ok=True)
+
+        # 动态绑定当前书籍的文件路径
+        self.full_volume_file = os.path.join(self.book_dir, f"{self.book_title}_full_volume.txt")
+        self.compressed_volume_file = os.path.join(self.book_dir, f"{self.book_title}_compressed_volume.txt")
+        self.state_file = os.path.join(self.book_dir, f"{self.book_title}_state.json")
+
         # 运行时状态
         self.full_volume = ""
         self.compressed_volume = ""
@@ -41,16 +47,16 @@ class AgentWorkflow:
 
     def load_local_data(self):
         """加载本地保存的完整卷和压缩卷，并恢复章节进度"""
-        if os.path.exists(FULL_VOLUME_FILE):
-            with open(FULL_VOLUME_FILE, "r", encoding="utf-8") as f:
+        if os.path.exists(self.full_volume_file):
+            with open(self.full_volume_file, "r", encoding="utf-8") as f:
                 self.full_volume = f.read()
-        if os.path.exists(COMPRESSED_VOLUME_FILE):
-            with open(COMPRESSED_VOLUME_FILE, "r", encoding="utf-8") as f:
+        if os.path.exists(self.compressed_volume_file):
+            with open(self.compressed_volume_file, "r", encoding="utf-8") as f:
                 self.compressed_volume = f.read()
 
-        if os.path.exists(STATE_FILE):
+        if os.path.exists(self.state_file):
             try:
-                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                with open(self.state_file, "r", encoding="utf-8") as f:
                     state = json.load(f)
                     completed_chapters = state.get("completed_chapters", 0)
                     self.current_chapter = completed_chapters + 1
@@ -66,13 +72,13 @@ class AgentWorkflow:
 
     def save_local_data(self):
         """保存完整卷、压缩卷和章节进度到本地"""
-        with open(FULL_VOLUME_FILE, "w", encoding="utf-8") as f:
+        with open(self.full_volume_file, "w", encoding="utf-8") as f:
             f.write(self.full_volume)
-        with open(COMPRESSED_VOLUME_FILE, "w", encoding="utf-8") as f:
+        with open(self.compressed_volume_file, "w", encoding="utf-8") as f:
             f.write(self.compressed_volume)
 
         try:
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
+            with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump({"completed_chapters": self.current_chapter}, f)
         except Exception as e:
             self.log(f"⚠️ 保存进度文件失败: {e}")
@@ -83,7 +89,6 @@ class AgentWorkflow:
             time.sleep(1)
             if getattr(self, 'is_running', False) is False: return None
 
-        # --- 核心修改：动态获取主备 API 配置 ---
         if use_fallback:
             model_name = self.config.get("fallback_api_model", "gemini-2.5-flash")
             api_type = self.config.get("fallback_api_type", "Gemini")
@@ -102,7 +107,6 @@ class AgentWorkflow:
         self.log(f"[{role}] {prefix_log}正在思考... (Model: {model_name} | Type: {api_type} | Level: {content_level})")
 
         try:
-            # API Key 轮询提取
             api_keys = [k.strip() for k in api_keys_str.split(",") if k.strip()]
             if not api_keys:
                 raise ValueError(f"未配置{'备用' if use_fallback else '主'} API Keys")
@@ -205,12 +209,12 @@ class AgentWorkflow:
                 text += "\n❤"
 
             self.log(f"[{role}] {prefix_log}回复完成:\n{text}\n" + "-" * 50)
-            time.sleep(5)
+            time.sleep(2)
             return text
 
         except Exception as e:
             self.log(f"[{role}] {prefix_log}❌ API调用异常: {e}")
-            time.sleep(5)
+            time.sleep(2)
 
             if not use_fallback:
                 if retry_count < 4:
@@ -251,7 +255,7 @@ class AgentWorkflow:
 
     def run_loop(self):
         self.is_running = True
-        self.log("=== 启动 AI 小说自动生成闭环 ===")
+        self.log(f"=== 启动 AI 小说自动生成闭环 (书籍: {self.book_title}) ===")
 
         outline = self.config.get("outline", "")
         style = self.config.get("style", "")
@@ -388,10 +392,11 @@ class NovelGeneratorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("自闭环AI小说生成器")
-        self.root.geometry("850x750")  # 稍微增加高度适应按钮
+        self.root.geometry("850x750")
 
         self.workflow = None
         self.thread = None
+        self.current_log_file = None  # 新增：用于记录动态的当前日志文件路径
         self.create_widgets()
         self.load_config()
 
@@ -416,22 +421,27 @@ class NovelGeneratorGUI:
         self.build_log_tab(log_frame)
 
     def build_input_tab(self, frame):
-        ttk.Label(frame, text="剧情大纲 (必选):").grid(row=0, column=0, sticky='w')
+        # --- 新增：书名输入框 ---
+        ttk.Label(frame, text="书名 (必选):").grid(row=0, column=0, sticky='w', pady=(5, 0))
+        self.book_title_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=self.book_title_var, width=50).grid(row=0, column=1, sticky='w', pady=(5, 0))
+
+        ttk.Label(frame, text="剧情大纲 (必选):").grid(row=1, column=0, sticky='w', pady=(5, 0))
         self.outline_text = scrolledtext.ScrolledText(frame, height=5)
-        self.outline_text.grid(row=1, column=0, columnspan=2, sticky='ew')
-        ttk.Button(frame, text="上传 .txt", command=lambda: self.load_txt(self.outline_text)).grid(row=0, column=1,
+        self.outline_text.grid(row=2, column=0, columnspan=2, sticky='ew')
+        ttk.Button(frame, text="上传 .txt", command=lambda: self.load_txt(self.outline_text)).grid(row=1, column=1,
                                                                                                    sticky='e')
 
-        ttk.Label(frame, text="剧情风格 (可选):").grid(row=2, column=0, sticky='w')
+        ttk.Label(frame, text="剧情风格 (可选):").grid(row=3, column=0, sticky='w', pady=(5, 0))
         self.style_text = scrolledtext.ScrolledText(frame, height=3)
-        self.style_text.grid(row=3, column=0, columnspan=2, sticky='ew')
-        ttk.Button(frame, text="上传 .txt", command=lambda: self.load_txt(self.style_text)).grid(row=2, column=1,
+        self.style_text.grid(row=4, column=0, columnspan=2, sticky='ew')
+        ttk.Button(frame, text="上传 .txt", command=lambda: self.load_txt(self.style_text)).grid(row=3, column=1,
                                                                                                  sticky='e')
 
-        ttk.Label(frame, text="人物列表 (可选):").grid(row=4, column=0, sticky='w')
+        ttk.Label(frame, text="人物列表 (可选):").grid(row=5, column=0, sticky='w', pady=(5, 0))
         self.char_text = scrolledtext.ScrolledText(frame, height=3)
-        self.char_text.grid(row=5, column=0, columnspan=2, sticky='ew')
-        ttk.Button(frame, text="上传 .txt", command=lambda: self.load_txt(self.char_text)).grid(row=4, column=1,
+        self.char_text.grid(row=6, column=0, columnspan=2, sticky='ew')
+        ttk.Button(frame, text="上传 .txt", command=lambda: self.load_txt(self.char_text)).grid(row=5, column=1,
                                                                                                 sticky='e')
 
     def build_agent_tab(self, frame):
@@ -493,7 +503,7 @@ class NovelGeneratorGUI:
         # 分割线
         ttk.Separator(frame, orient='horizontal').grid(row=9, column=0, columnspan=2, sticky='ew', pady=10)
 
-        # --- 新增：备用 API 配置区 ---
+        # --- 备用 API 配置区 ---
         ttk.Label(frame, text="【备用 API 配置 (可选) - 当主API连续失败5次后临时接管】", font=('bold'),
                   foreground='gray').grid(row=10, column=0, columnspan=2, sticky='w', pady=(5, 0))
         ttk.Label(frame, text="备用 API 类型:").grid(row=11, column=0, sticky='w', pady=2)
@@ -625,14 +635,17 @@ class NovelGeneratorGUI:
         self.log_text.see(tk.END)
         self.log_text.config(state='disabled')
 
-        try:
-            with open(RUN_LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(message + "\n")
-        except Exception as e:
-            pass
+        # --- 变动：动态写入属于当前书名的日志 ---
+        if self.current_log_file:
+            try:
+                with open(self.current_log_file, "a", encoding="utf-8") as f:
+                    f.write(message + "\n")
+            except Exception as e:
+                pass
 
     def get_config_dict(self):
         return {
+            "book_title": self.book_title_var.get().strip(),  # --- 新增存入书籍名称 ---
             "api_type": self.api_type_var.get(),
             "content_level": self.content_level_var.get(),
             "global_prompt": self.global_prompt_text.get(1.0, tk.END).strip(),
@@ -643,7 +656,6 @@ class NovelGeneratorGUI:
             "api_url": self.api_url_var.get(),
             "api_model": self.api_model_var.get(),
 
-            # --- 新增的配置保存 ---
             "fallback_api_type": self.fallback_api_type_var.get(),
             "fallback_api_keys": self.fallback_api_keys_var.get(),
             "fallback_api_url": self.fallback_api_url_var.get(),
@@ -668,6 +680,7 @@ class NovelGeneratorGUI:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
+                self.book_title_var.set(config.get("book_title", ""))  # --- 新增读取书籍名称 ---
                 self.api_type_var.set(config.get("api_type", "Gemini"))
 
                 if "content_level" in config:
@@ -687,7 +700,6 @@ class NovelGeneratorGUI:
                 self.api_url_var.set(config.get("api_url", "https://generativelanguage.googleapis.com"))
                 self.api_model_var.set(config.get("api_model", "gemini-2.5-flash"))
 
-                # --- 新增：读取备用API配置 ---
                 self.fallback_api_type_var.set(config.get("fallback_api_type", "OpenAI Compatible"))
                 self.fallback_api_keys_var.set(config.get("fallback_api_keys", ""))
                 self.fallback_api_url_var.set(config.get("fallback_api_url", ""))
@@ -702,12 +714,24 @@ class NovelGeneratorGUI:
                     if role == "清洗者": vals["count"].set(config.get("cleaner_count", "1"))
 
     def start_generation(self):
+        # --- 新增书名判空逻辑 ---
+        raw_title = self.book_title_var.get().strip()
+        if not raw_title:
+            messagebox.showerror("错误", "书名不能为空！")
+            return
+
         if not self.api_keys_var.get().strip():
             messagebox.showerror("错误", "主 API Keys 不能为空！")
             return
         if not self.outline_text.get(1.0, tk.END).strip():
             messagebox.showerror("错误", "剧情大纲不能为空！")
             return
+
+        # 在界面侧也生成目录结构，确保开始记录 Log 时目录已存在
+        safe_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title)
+        book_dir = os.path.join("BOOKS", safe_title)
+        os.makedirs(book_dir, exist_ok=True)
+        self.current_log_file = os.path.join(book_dir, f"{safe_title}_agent_run_log.txt")
 
         self.save_config()
         self.start_btn.config(state=tk.DISABLED)
