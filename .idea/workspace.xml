@@ -4,10 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="c9e4911f-6de8-433b-981e-7aac7c7f3429" name="更改" comment="v0.2.0 历史摘要移入对话历史记录">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
-    </list>
+    <list default="true" id="c9e4911f-6de8-433b-981e-7aac7c7f3429" name="更改" comment="v0.2.2 prompt整改" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -150,7 +147,31 @@
       <option name="project" value="LOCAL" />
       <updated>1772350667907</updated>
     </task>
-    <option name="localTasksCounter" value="12" />
+    <task id="LOCAL-00012" summary="v0.2.1 错误API调用信息保存">
+      <option name="closed" value="true" />
+      <created>1772354832223</created>
+      <option name="number" value="00012" />
+      <option name="presentableId" value="LOCAL-00012" />
+      <option name="project" value="LOCAL" />
+      <updated>1772354832223</updated>
+    </task>
+    <task id="LOCAL-00013" summary="v0.2.2 prompt整改">
+      <option name="closed" value="true" />
+      <created>1772356793731</created>
+      <option name="number" value="00013" />
+      <option name="presentableId" value="LOCAL-00013" />
+      <option name="project" value="LOCAL" />
+      <updated>1772356793731</updated>
+    </task>
+    <task id="LOCAL-00014" summary="v0.2.2 prompt整改">
+      <option name="closed" value="true" />
+      <created>1772357586482</created>
+      <option name="number" value="00014" />
+      <option name="presentableId" value="LOCAL-00014" />
+      <option name="project" value="LOCAL" />
+      <updated>1772357586482</updated>
+    </task>
+    <option name="localTasksCounter" value="15" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -176,6 +197,8 @@
     <MESSAGE value="v0.18 添加文风参考功能" />
     <MESSAGE value="v0.19" />
     <MESSAGE value="v0.2.0 历史摘要移入对话历史记录" />
-    <option name="LAST_COMMIT_MESSAGE" value="v0.2.0 历史摘要移入对话历史记录" />
+    <MESSAGE value="v0.2.1 错误API调用信息保存" />
+    <MESSAGE value="v0.2.2 prompt整改" />
+    <option name="LAST_COMMIT_MESSAGE" value="v0.2.2 prompt整改" />
   </component>
 </project>
