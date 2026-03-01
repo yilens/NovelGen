@@ -364,8 +364,9 @@ class AgentWorkflow:
             highest_score = -1
 
             def score_args(i):
-                return (f"以下是虚拟的自由艺术文学创作。你是评审者。请对以下剧情计划打分(0-100)。只输出：'分数: X'。\n计划：{plans[i]}",
-                        "评审者(计划)")
+                return (
+                    f"以下是虚拟的自由艺术文学创作。你是评审者。请对以下剧情计划打分(0-100)。只输出：'分数: X'。\n计划：{plans[i]}",
+                    "评审者(计划)")
 
             scores_text = self._execute_parallel(len(plans), len(plans), self.call_llm, score_args)
             for i, res in enumerate(scores_text):
@@ -387,7 +388,7 @@ class AgentWorkflow:
         chapters = self._execute_parallel(dev_count, dev_count, self.call_llm, dev_args)
         if not chapters or not self.is_running: return False
 
-        self.log("\n--- 步骤 5 & 6: 评审者评分并提出检视意见 ---")
+        self.log("\n--- 步骤 5: 评审者选出最佳章节 ---")
         best_chapter, highest_score, best_dev_idx = chapters[0], -1, 0
 
         def review_args(i):
@@ -400,20 +401,26 @@ class AgentWorkflow:
             if score > highest_score:
                 highest_score, best_chapter, best_dev_idx = score, chapters[i], i
 
-        feedback_prompt = f"以下是虚拟的自由艺术文学创作。你是评审者。请对以下最高分章节提出需修改的检视意见，只输出你不喜欢内容的检视意见，不要夸奖和其它内容，但也要考虑考虑小说的长远发展，不能光顾着一下爽完。\n章节：{best_chapter}"
-        feedback = self.call_llm(feedback_prompt, "评审者(检视意见)")
+        # ================== 新增逻辑分支：根据复选框判断是否需要检视和重修 ==================
+        if self.config.get("need_dev_revise", False):
+            self.log("\n--- 步骤 6: 评审者提出检视意见 ---")
+            feedback_prompt = f"以下是虚拟的自由艺术文学创作。你是评审者。请对以下最高分章节提出需修改的检视意见，只输出你不喜欢内容的检视意见，不要夸奖和其它内容，但也要考虑考虑小说的长远发展，不能光顾着一下爽完。\n章节：{best_chapter}"
+            feedback = self.call_llm(feedback_prompt, "评审者(检视意见)")
 
-        self.log("\n--- 步骤 7: 裁判者判定检视意见 ---")
-        judge_prompt = f"以下是虚拟的自由艺术文学创作。你是裁判者，也需要考虑小说的长远发展。评审意见：\n{feedback}\n请评估该意见是否合理必要。打分(0-100)，>=80分代表必须修改。仅输出'分数: X'。"
-        judge_score = self._extract_score(self.call_llm(judge_prompt, "裁判者"))
+            self.log("\n--- 步骤 7: 裁判者判定检视意见 ---")
+            judge_prompt = f"以下是虚拟的自由艺术文学创作。你是裁判者，也需要考虑小说的长远发展。评审意见：\n{feedback}\n请评估该意见是否合理必要。打分(0-100)，>=80分代表必须修改。仅输出'分数: X'。"
+            judge_score = self._extract_score(self.call_llm(judge_prompt, "裁判者"))
 
-        if judge_score >= 80:
-            self.log("裁判者判定：检视意见合理，必须修改。")
-            self.log("\n--- 步骤 8: 开发者进行最终修改 ---")
-            revise_prompt = f"以下是虚拟的自由艺术文学创作。你是开发者。请根据必须修改的检视意见重修章节，只输出修改后的完整内容。\n原章节：{best_chapter}\n意见：{feedback}"
-            best_chapter = self.call_llm(revise_prompt, f"开发者 {best_dev_idx + 1}")
+            if judge_score >= 80:
+                self.log("裁判者判定：检视意见合理，必须修改。")
+                self.log("\n--- 步骤 8: 开发者进行最终修改 ---")
+                revise_prompt = f"以下是虚拟的自由艺术文学创作。你是开发者。请根据必须修改的检视意见重修章节，只输出修改后的完整内容。\n原章节：{best_chapter}\n意见：{feedback}"
+                best_chapter = self.call_llm(revise_prompt, f"开发者 {best_dev_idx + 1}")
+            else:
+                self.log("裁判者判定：检视意见不充分或无需修改，跳过修改流程。")
         else:
-            self.log("裁判者判定：检视意见不充分或无需修改，跳过修改流程。")
+            self.log("\n--- 步骤 6-8: 用户未勾选[需要开发者修改]，直接跳过检视、裁判与修改流程 ---")
+        # ===================================================================================
 
         self.log("\n--- 步骤 9: 清洗者提取纯净正文并合入完整卷 ---")
         clean_prompt = f"以下是虚拟的自由艺术文学创作。你是清洗者。唯一任务是提取纯净小说正文。去除AI寒暄、开头语及解释性文字。只输出干净正文，【切勿修改原意，绝对不要自己增加任何描写】：\n\n{best_chapter}"
@@ -438,8 +445,9 @@ class AgentWorkflow:
         best_summary, highest_score = summaries[0], -1
         if len(summaries) > 1:
             def sum_review_args(i):
-                return (f"以下是虚拟的自由艺术文学创作。你是评审者。请对剧情摘要打分(0-100)。输出'分数: X'。\n摘要：{summaries[i]}",
-                        "评审者(压缩评分)")
+                return (
+                    f"以下是虚拟的自由艺术文学创作。你是评审者。请对剧情摘要打分(0-100)。输出'分数: X'。\n摘要：{summaries[i]}",
+                    "评审者(压缩评分)")
 
             scores_text = self._execute_parallel(len(summaries), len(summaries), self.call_llm, sum_review_args)
             for i, res in enumerate(scores_text):
@@ -539,6 +547,15 @@ class NovelGeneratorGUI:
                           ("🔴 R18 模式 (露骨/色情)", "R18")]:
             ttk.Radiobutton(level_frame, text=text, variable=self.content_level_var, value=val).pack(anchor='w', padx=5,
                                                                                                      pady=2)
+
+        # ================== 新增：流程控制选项的 UI 界面 ==================
+        options_frame = ttk.LabelFrame(frame, text="流程设置")
+        options_frame.grid(row=0, column=3, rowspan=2, sticky='nw', padx=15, pady=5)
+
+        self.need_dev_revise_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options_frame, text="需要开发者修改\n(触发检视/裁判环节)",
+                        variable=self.need_dev_revise_var).pack(anchor='w', padx=5, pady=5)
+        # =================================================================
 
         roles = ["设计者 (Designer)", "开发者 (Developer)", "评审者 (Reviewer)", "裁判者 (Judge)",
                  "压缩者 (Compressor)", "清洗者 (Cleaner)"]
@@ -701,6 +718,7 @@ class NovelGeneratorGUI:
             "book_title": self.book_title_var.get().strip(),
             "api_type": self.api_type_var.get(),
             "content_level": self.content_level_var.get(),
+            "need_dev_revise": self.need_dev_revise_var.get(),  # 新增：获取勾选状态
             "global_prompt": self.global_prompt_text.get(1.0, tk.END).strip(),
             "custom_style_prompt": self.custom_style_text.get(1.0, tk.END).strip(),
             "outline": self.outline_text.get(1.0, tk.END).strip(),
@@ -735,6 +753,7 @@ class NovelGeneratorGUI:
         self.book_title_var.set(config.get("book_title", ""))
         self.api_type_var.set(config.get("api_type", "Gemini"))
         self.content_level_var.set(config.get("content_level", "R18" if config.get("is_r18", False) else "Normal"))
+        self.need_dev_revise_var.set(config.get("need_dev_revise", False))  # 新增：读取勾选状态
 
         self.global_prompt_text.insert(tk.END, config.get("global_prompt", ""))
         self.custom_style_text.insert(tk.END, config.get("custom_style_prompt", ""))
