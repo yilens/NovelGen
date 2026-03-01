@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="c9e4911f-6de8-433b-981e-7aac7c7f3429" name="更改" comment="v0.2.2 prompt整改">
+    <list default="true" id="c9e4911f-6de8-433b-981e-7aac7c7f3429" name="更改" comment="v0.2.4 改为webui">
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -181,7 +181,31 @@
       <option name="project" value="LOCAL" />
       <updated>1772357957810</updated>
     </task>
-    <option name="localTasksCounter" value="16" />
+    <task id="LOCAL-00016" summary="v0.2.3 新增检视意见按钮">
+      <option name="closed" value="true" />
+      <created>1772358816012</created>
+      <option name="number" value="00016" />
+      <option name="presentableId" value="LOCAL-00016" />
+      <option name="project" value="LOCAL" />
+      <updated>1772358816012</updated>
+    </task>
+    <task id="LOCAL-00017" summary="v0.2.3 新增护盾">
+      <option name="closed" value="true" />
+      <created>1772360101687</created>
+      <option name="number" value="00017" />
+      <option name="presentableId" value="LOCAL-00017" />
+      <option name="project" value="LOCAL" />
+      <updated>1772360101687</updated>
+    </task>
+    <task id="LOCAL-00018" summary="v0.2.4 改为webui">
+      <option name="closed" value="true" />
+      <created>1772426865254</created>
+      <option name="number" value="00018" />
+      <option name="presentableId" value="LOCAL-00018" />
+      <option name="project" value="LOCAL" />
+      <updated>1772426865254</updated>
+    </task>
+    <option name="localTasksCounter" value="19" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -209,6 +233,9 @@
     <MESSAGE value="v0.2.0 历史摘要移入对话历史记录" />
     <MESSAGE value="v0.2.1 错误API调用信息保存" />
     <MESSAGE value="v0.2.2 prompt整改" />
-    <option name="LAST_COMMIT_MESSAGE" value="v0.2.2 prompt整改" />
+    <MESSAGE value="v0.2.3 新增检视意见按钮" />
+    <MESSAGE value="v0.2.3 新增护盾" />
+    <MESSAGE value="v0.2.4 改为webui" />
+    <option name="LAST_COMMIT_MESSAGE" value="v0.2.4 改为webui" />
   </component>
 </project>
