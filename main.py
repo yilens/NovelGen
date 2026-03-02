@@ -20,7 +20,7 @@ from openai import OpenAI
 CONFIG_FILE = "user_input.json"
 USER_DB_FILE = "users_db.json"
 MAX_API_RETRIES = 10
-
+RECENT_CHAPTERS_COUNT = 3  # ✅ 新增：代表暂存并发给开发者的完整章节章数
 
 ROLE_MAP = {
     "设计者": "designer",
@@ -227,6 +227,19 @@ class AgentWorkflow:
         self.full_volume = FileManager.safe_read(self.full_volume_file)
         self.compressed_volume = FileManager.safe_read(self.compressed_volume_file)
         self.current_chapter = 1
+        self.chapter_texts = {}  # ✅ 新增：在内存中维护历史章节正文映射
+
+        # ✅ 通过正则解析已保存的完整卷，提取历史章节数据放入字典，以便重启后依然能读到前情
+        if self.full_volume.strip():
+            pattern = r"第(\d+)章\n(.*?)(?=\n\n第\d+章\n|$)"
+            matches = re.finditer(pattern, self.full_volume, re.DOTALL)
+            for m in matches:
+                try:
+                    ch_num = int(m.group(1))
+                    ch_text = m.group(2).strip()
+                    self.chapter_texts[ch_num] = ch_text
+                except:
+                    pass
 
         if os.path.exists(self.state_file):
             try:
@@ -603,8 +616,20 @@ class AgentWorkflow:
         self.log("\n--- 步骤 3 & 4: 开发者并发编写章节 ---")
         dev_count = int(self.config.get("developer_count", 1))
 
+        # ✅ 新增逻辑：提取最近 N 章的完整正文，供开发者参考上下文
+        recent_chapters_text = ""
+        start_ch = max(1, self.current_chapter - RECENT_CHAPTERS_COUNT)
+        for c in range(start_ch, self.current_chapter):
+            if c in self.chapter_texts:
+                recent_chapters_text += f"\n\n【第{c}章正文回顾】\n{self.chapter_texts[c]}"
+
         def dev_args(i):
             prompt = f"以下是虚拟的自由艺术文学创作。你是开发者。请根据以下计划编写第{self.current_chapter}章正文（>2000字）。\n【重要要求】：请只输出小说内容，并务必将小说正文包裹在 <text> 和 </text> 标签内！\n开发计划：{self.best_plan}\n"
+
+            # ✅ 将最近正文加入发给开发者的提示词中
+            if recent_chapters_text:
+                prompt += f"\n【重要前情提要】：为了保证文风、细节和剧情走向的绝对连贯，以下是最近 {RECENT_CHAPTERS_COUNT} 章的完整正文供你参考：{recent_chapters_text}\n"
+
             return (prompt, f"开发者 {i + 1}", False, self.compressed_volume)
 
         chapters = self._execute_parallel(dev_count, dev_count, self.call_llm, dev_args)
@@ -650,6 +675,7 @@ class AgentWorkflow:
                 self.log("[清洗者] 未找到 <text> 标签，已进行基础去前缀脱壳清洗。")
 
         self.full_volume += f"\n\n第{self.current_chapter}章\n{final_text}"
+        self.chapter_texts[self.current_chapter] = final_text  # ✅ 新增：在内存中更新最新一章的正文
         self.best_chapter = best_chapter
         return True
 
@@ -810,6 +836,7 @@ def on_user_login(username):
         val = d_val if d_val in modes else (modes[0] if modes else None)
         updates.append(gr.update(choices=modes, value=val))
     return updates
+
 
 def build_config_dict(*args):
     keys = [
