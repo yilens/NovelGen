@@ -7,6 +7,7 @@ import urllib.request
 import urllib.error
 import time
 import random
+import shutil  # 新增：用于将文件夹打包为zip压缩包
 from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from google.genai import types
@@ -15,6 +16,7 @@ from openai import OpenAI
 # --- 常量配置 ---
 CONFIG_FILE = "user_input.json"
 MAX_API_RETRIES = 10
+
 
 class AgentWorkflow:
     def __init__(self, config, log_callback):
@@ -561,6 +563,26 @@ def toggle_pause():
         return "⏸ 暂停", "工作流已恢复"
 
 
+# --- 新增：文件夹打包与导出函数 ---
+def export_book_folder(raw_title):
+    if not raw_title:
+        return gr.update(visible=False, value=None), "❌ 书名为空，无法下载。"
+
+    # 与建立文件夹时同样的命名清洗逻辑
+    book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title.strip()) or "未命名小说"
+    book_dir = os.path.join("BOOKS", book_title)
+
+    if not os.path.exists(book_dir):
+        return gr.update(visible=False, value=None), f"❌ 找不到该书的文件夹 ({book_dir})，请确认是否已生成过内容。"
+
+    # 将文件夹打包为 ZIP 文件
+    zip_base_path = os.path.join("BOOKS", f"{book_title}_完整包")
+    shutil.make_archive(zip_base_path, 'zip', book_dir)
+    zip_file_path = f"{zip_base_path}.zip"
+
+    return gr.update(value=zip_file_path, visible=True), "✅ 文件夹打包成功！请点击上方出现的文件卡片进行下载。"
+
+
 # --- UI 渲染 ---
 with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.Soft()) as demo:
     gr.Markdown("## 📚 自闭环 AI 小说自动生成器 (并发加速 WebUI 版)")
@@ -657,6 +679,11 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
                 btn_start = gr.Button("▶ 开始生成", variant="primary")
                 btn_pause = gr.Button("⏸ 暂停", interactive=False)
                 btn_save = gr.Button("💾 保存配置")
+                # 新增：打包下载功能按钮
+                btn_download = gr.Button("📦 打包下载当前书目")
+
+            # 新增：用于提供真实下载动作的 File 组件 (平时隐藏，生成成功后展示)
+            download_file = gr.File(label="获取成功！点击下载压缩包", interactive=False, visible=False)
 
             sys_msg = gr.Textbox(label="系统提示", interactive=False)
             log_output = gr.Textbox(label="运行日志 (自动滚动)", lines=25, max_lines=25, interactive=False)
@@ -687,6 +714,13 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
         fn=toggle_pause,
         inputs=[],
         outputs=[btn_pause, sys_msg]
+    )
+
+    # 新增：绑定下载按钮点击事件
+    btn_download.click(
+        fn=export_book_folder,
+        inputs=[book_title],
+        outputs=[download_file, sys_msg]
     )
 
 if __name__ == "__main__":
