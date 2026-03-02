@@ -20,6 +20,14 @@ CONFIG_FILE = "user_input.json"
 USER_DB_FILE = "users_db.json"
 MAX_API_RETRIES = 10
 
+ROLE_MAP = {
+    "设计者": "designer",
+    "开发者": "developer",
+    "评审者": "reviewer",
+    "裁判者": "judge",
+    "压缩者": "compressor",
+    "清洗者": "cleaner"
+}
 
 # ==========================================
 # 数据与文件管理模块
@@ -119,25 +127,22 @@ class FileManager:
 # 核心业务对象与工作流
 # ==========================================
 class APIKeyManager:
-    """管理 API Key 的轮询机制"""
+    """管理 API Key 的轮询机制 (支持多个独立的 Key 池)"""
 
     def __init__(self):
-        self.key_index = 0
-        self.fallback_key_index = 0
+        self.indices = {}
         self.lock = threading.Lock()
 
-    def get_next_key(self, api_keys_str: str, use_fallback: bool) -> str:
+    def get_next_key(self, api_keys_str: str) -> str:
         api_keys = [k.strip() for k in api_keys_str.split(",") if k.strip()]
         if not api_keys:
-            raise ValueError(f"未配置{'备用' if use_fallback else '主'} API Keys")
+            raise ValueError("未配置 API Keys")
 
         with self.lock:
-            if use_fallback:
-                key = api_keys[self.fallback_key_index % len(api_keys)]
-                self.fallback_key_index += 1
-            else:
-                key = api_keys[self.key_index % len(api_keys)]
-                self.key_index += 1
+            if api_keys_str not in self.indices:
+                self.indices[api_keys_str] = 0
+            key = api_keys[self.indices[api_keys_str] % len(api_keys)]
+            self.indices[api_keys_str] += 1
         return key
 
 
@@ -208,26 +213,38 @@ class AgentWorkflow:
         except Exception as e:
             self.log(f"⚠️ 无法保存错误请求日志: {e}")
 
-    # --- 工作流控制 ---
-    def pause(self):
-        self.run_event.clear()
-
-    def resume(self):
-        self.run_event.set()
-
-    def stop(self):
-        self.is_running = False
-        self.run_event.set()
-
     # --- API 与提示词构建 ---
-    def _get_api_config(self, use_fallback):
-        prefix = "fallback_" if use_fallback else ""
+    def _get_api_config(self, use_fallback, role=""):
+        if use_fallback:
+            prefix = "fallback_"
+            return {
+                "model_name": self.config.get(f"{prefix}api_model", "gemini-2.5-flash"),
+                "api_type": self.config.get(f"{prefix}api_type", "Gemini"),
+                "api_url": self.config.get(f"{prefix}api_url", "").strip(),
+                "api_keys_str": self.config.get(f"{prefix}api_keys", ""),
+                "log_prefix": "【备用API】"
+            }
+
+        # 检查是否配置了独立 Agent API
+        base_role = role.split()[0].split('(')[0] if role else ""
+        agent_prefix = ROLE_MAP.get(base_role, "")
+
+        if agent_prefix and self.config.get(f"{agent_prefix}_api_keys", "").strip():
+            return {
+                "model_name": self.config.get(f"{agent_prefix}_api_model", "gemini-2.5-flash"),
+                "api_type": self.config.get(f"{agent_prefix}_api_type", "Gemini"),
+                "api_url": self.config.get(f"{agent_prefix}_api_url", "").strip(),
+                "api_keys_str": self.config.get(f"{agent_prefix}_api_keys", ""),
+                "log_prefix": f"【{base_role}专属API】"
+            }
+
+        # 默认返回主 API 配置
         return {
-            "model_name": self.config.get(f"{prefix}api_model", "gemini-2.5-flash"),
-            "api_type": self.config.get(f"{prefix}api_type", "Gemini"),
-            "api_url": self.config.get(f"{prefix}api_url", "").strip(),
-            "api_keys_str": self.config.get(f"{prefix}api_keys", ""),
-            "log_prefix": "【备用API】" if use_fallback else ""
+            "model_name": self.config.get("api_model", "gemini-2.5-flash"),
+            "api_type": self.config.get("api_type", "Gemini"),
+            "api_url": self.config.get("api_url", "").strip(),
+            "api_keys_str": self.config.get("api_keys", ""),
+            "log_prefix": ""
         }
 
     def _build_system_instructions(self, role, content_level):
@@ -254,17 +271,33 @@ class AgentWorkflow:
 
         return is_tool_agent, sys_inst, intro
 
+    # --- 工作流控制 ---
+    def pause(self):
+        self.run_event.clear()
+
+    def resume(self):
+        self.run_event.set()
+
+    def stop(self):
+        self.is_running = False
+        self.run_event.set()
+
     def call_llm(self, prompt, role="Agent", use_fallback=False, history_text=""):
         self.run_event.wait()
         if not self.is_running: return None
 
-        conf = self._get_api_config(use_fallback)
+        conf = self._get_api_config(use_fallback, role)
         self.log(f"[{role}] {conf['log_prefix']}正在思考... (Model: {conf['model_name']})")
 
         global_prompt = self.config.get("global_prompt", "").strip()
         base_final_prompt = f"\n{global_prompt}\n\n【当前具体任务】：\n{prompt}" if global_prompt else prompt
         is_tool, sys_inst, model_intro = self._build_system_instructions(role,
                                                                          self.config.get("content_level", "Normal"))
+
+        # 获取模型参数
+        temperature = float(self.config.get("temperature", 0.7))
+        top_p = float(self.config.get("top_p", 0.9))
+        top_k = int(self.config.get("top_k", 40))
 
         safety_block_count = 0
 
@@ -280,14 +313,14 @@ class AgentWorkflow:
                     if attempt > 0:
                         self.log(f"[{role}] 🛡️ 注入护盾: 共{total_multiplier}条虚拟创作声明")
 
-                api_key = self.key_manager.get_next_key(conf["api_keys_str"], use_fallback)
+                api_key = self.key_manager.get_next_key(conf["api_keys_str"])
 
                 if conf["api_type"] == "Gemini":
                     text = self._call_gemini(api_key, conf["model_name"], sys_inst, current_final_prompt, model_intro,
-                                             history_text)
+                                             history_text, temperature, top_p, top_k)
                 elif conf["api_type"] == "OpenAI Compatible":
                     text = self._call_openai(api_key, conf["api_url"], conf["model_name"], sys_inst,
-                                             current_final_prompt, model_intro, history_text)
+                                             current_final_prompt, model_intro, history_text, temperature, top_p)
                 else:
                     raise ValueError(f"未知的 API 类型: {conf['api_type']}")
 
@@ -312,10 +345,10 @@ class AgentWorkflow:
                     self.run_event.wait(2)
 
         if not use_fallback and bool(self.config.get("fallback_api_keys", "").strip()):
-            self.log(f"[{role}] ⚠️ 主API已连续失败！临时切换使用【备用API】进行作业...")
+            self.log(f"[{role}] ⚠️ 主API(或专属API)已连续失败！临时切换使用【备用API】进行作业...")
             return self.call_llm(prompt, role, use_fallback=True, history_text=history_text)
 
-        self.log(f"[{role}] ⛔ {'备用' if use_fallback else '主'}API连续调用失败！工作流已彻底暂停。")
+        self.log(f"[{role}] ⛔ {'备用' if use_fallback else '主/专属'}API连续调用失败！工作流已彻底暂停。")
         self.pause()
         self.run_event.wait()
 
@@ -324,7 +357,7 @@ class AgentWorkflow:
             return self.call_llm(prompt, role, use_fallback=False, history_text=history_text)
         return None
 
-    def _call_gemini(self, api_key, model_name, sys_inst, final_prompt, model_intro, history_text):
+    def _call_gemini(self, api_key, model_name, sys_inst, final_prompt, model_intro, history_text, temperature, top_p, top_k):
         client = genai.Client(api_key=api_key)
         safety_settings = [
             types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
@@ -332,7 +365,13 @@ class AgentWorkflow:
             types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
             types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
         ]
-        config = types.GenerateContentConfig(system_instruction=sys_inst, safety_settings=safety_settings)
+        config = types.GenerateContentConfig(
+            system_instruction=sys_inst,
+            safety_settings=safety_settings,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k
+        )
         contents = [
             types.Content(role="user", parts=[types.Part.from_text(text="自我介绍一下。")]),
             types.Content(role="model", parts=[types.Part.from_text(text=model_intro)])
@@ -350,7 +389,7 @@ class AgentWorkflow:
             raise ValueError(f"内容生成异常终止，原因: {response.candidates[0].finish_reason}")
         return response.text
 
-    def _call_openai(self, api_key, api_url, model_name, sys_inst, final_prompt, model_intro, history_text):
+    def _call_openai(self, api_key, api_url, model_name, sys_inst, final_prompt, model_intro, history_text, temperature, top_p):
         client_kwargs = {"api_key": api_key}
         if api_url: client_kwargs["base_url"] = api_url
         client = OpenAI(**client_kwargs)
@@ -366,7 +405,12 @@ class AgentWorkflow:
                              "content": f"明白，以下是我之前已经完成的剧情摘要，我会基于此继续推进：\n{history_text}"})
 
         messages.append({"role": "user", "content": final_prompt})
-        response = client.chat.completions.create(model=model_name, messages=messages)
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=temperature,
+            top_p=top_p
+        )
         return response.choices[0].message.content
 
     # --- 流程工具方法 ---
@@ -591,8 +635,14 @@ def build_config_dict(*args):
         "global_prompt", "custom_style_prompt", "content_level", "need_dev_revise",
         "designer_count", "developer_count", "reviewer_count", "judge_count", "compressor_count", "cleaner_count",
         "api_type", "api_keys", "api_url", "api_model",
-        "fallback_api_type", "fallback_api_keys", "fallback_api_url", "fallback_api_model"
+        "fallback_api_type", "fallback_api_keys", "fallback_api_url", "fallback_api_model",
+        "temperature", "top_p", "top_k"
     ]
+    # 添加独立 Agent API 的 keys
+    agent_names = ["designer", "developer", "reviewer", "judge", "compressor", "cleaner"]
+    for en_name in agent_names:
+        keys.extend([f"{en_name}_api_type", f"{en_name}_api_keys", f"{en_name}_api_url", f"{en_name}_api_model"])
+
     return dict(zip(keys, args))
 
 
@@ -711,6 +761,12 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
 
             # Tab 3: API 配置
             with gr.TabItem("🔑 API 配置"):
+                with gr.Accordion("⚙️ 模型生成参数 (默认均衡值)", open=False):
+                    with gr.Row():
+                        temperature = gr.Slider(0.0, 2.0, value=float(init_conf.get("temperature", 0.7)), step=0.1, label="Temperature (温度)")
+                        top_p = gr.Slider(0.0, 1.0, value=float(init_conf.get("top_p", 0.9)), step=0.05, label="Top P")
+                        top_k = gr.Slider(1, 100, value=int(init_conf.get("top_k", 40)), step=1, label="Top K")
+
                 api_status = gr.Textbox(label="API 获取状态", interactive=False)
                 gr.Markdown("### 【主 API 配置】")
                 with gr.Row():
@@ -746,6 +802,22 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
                                              inputs=[fallback_api_type, fallback_api_url, fallback_api_keys],
                                              outputs=[fallback_api_model, api_status])
 
+                gr.Markdown("---")
+                agent_api_inputs = []
+                with gr.Accordion("🤖 独立 Agent API 配置 (按需填写，留空则使用主API)", open=False):
+                    agent_names_map = [("设计者", "designer"), ("开发者", "developer"), ("评审者", "reviewer"),
+                                       ("裁判者", "judge"), ("压缩者", "compressor"), ("清洗者", "cleaner")]
+                    with gr.Tabs():
+                        for zh_name, en_name in agent_names_map:
+                            with gr.TabItem(f"{zh_name}"):
+                                with gr.Row():
+                                    a_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label=f"{zh_name} API 类型", value=init_conf.get(f"{en_name}_api_type", "Gemini"))
+                                    a_keys = gr.Textbox(label=f"{zh_name} API Keys (留空则用主API)", type="password", value=init_conf.get(f"{en_name}_api_keys", ""))
+                                with gr.Row():
+                                    a_url = gr.Textbox(label=f"{zh_name} API URL", value=init_conf.get(f"{en_name}_api_url", ""))
+                                    a_model = gr.Dropdown(label=f"{zh_name} API 模型", choices=[init_conf.get(f"{en_name}_api_model", "gemini-2.5-flash")], value=init_conf.get(f"{en_name}_api_model", "gemini-2.5-flash"), allow_custom_value=True)
+                                agent_api_inputs.extend([a_type, a_keys, a_url, a_model])
+
             # Tab 4: 控制台 & 日志
             with gr.TabItem("💻 控制台 & 日志"):
                 with gr.Row():
@@ -771,8 +843,9 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
         global_prompt, custom_style_prompt, content_level, need_dev_revise,
         designer_count, developer_count, reviewer_count, judge_count, compressor_count, cleaner_count,
         api_type, api_keys, api_url, api_model,
-        fallback_api_type, fallback_api_keys, fallback_api_url, fallback_api_model
-    ]
+        fallback_api_type, fallback_api_keys, fallback_api_url, fallback_api_model,
+        temperature, top_p, top_k
+    ] + agent_api_inputs
 
     # --- 事件绑定 ---
     btn_register.click(UserManager.register, inputs=[input_user, input_pwd], outputs=[auth_msg])
