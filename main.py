@@ -123,7 +123,7 @@ class ModeManager:
 
 
 class FileManager:
-    """管理书籍文件的读写、导出与删除"""
+    """管理书籍及配置文件的读写、导出与删除"""
 
     @staticmethod
     def get_user_books(username):
@@ -131,7 +131,9 @@ class FileManager:
         user_dir = os.path.join("BOOKS", username)
         if not os.path.exists(user_dir):
             return gr.update(choices=[], value=None)
-        books = [d for d in os.listdir(user_dir) if os.path.isdir(os.path.join(user_dir, d)) and d != "mode"]
+        # 排除了系统文件夹 (mode, outline等)
+        books = [d for d in os.listdir(user_dir) if
+                 os.path.isdir(os.path.join(user_dir, d)) and d not in ["mode", "modes", "outline"]]
         return gr.update(choices=books, value=books[0] if books else None)
 
     @staticmethod
@@ -171,6 +173,53 @@ class FileManager:
             with open(filepath, "r", encoding="utf-8") as f:
                 return f.read()
         return ""
+
+    # === 新增：人工大纲文件的保存与读取方法 ===
+    @staticmethod
+    def get_manual_outlines(username):
+        if not username: return gr.update(choices=[], value=None)
+        outline_dir = os.path.join("BOOKS", username, "outline")
+        if not os.path.exists(outline_dir):
+            return gr.update(choices=[], value=None)
+        outlines = [f for f in os.listdir(outline_dir) if f.endswith('.json')]
+        return gr.update(choices=outlines, value=outlines[0] if outlines else None)
+
+    @staticmethod
+    def save_manual_outline(username, outline_name, df_data):
+        if not username: return "❌ 请先登录", gr.update()
+        if not outline_name or not outline_name.strip(): return "❌ 大纲名称不能为空", gr.update()
+        if not df_data or len(df_data) == 0: return "❌ 大纲数据不能为空", gr.update()
+
+        safe_name = re.sub(r'[\\/:*?"<>|]', '_', outline_name.strip())
+        if not safe_name.endswith('.json'):
+            safe_name += '.json'
+
+        outline_dir = os.path.join("BOOKS", username, "outline")
+        os.makedirs(outline_dir, exist_ok=True)
+        filepath = os.path.join(outline_dir, safe_name)
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(df_data, f, ensure_ascii=False, indent=4)
+            return f"✅ 大纲 [{safe_name}] 保存成功！", FileManager.get_manual_outlines(username)
+        except Exception as e:
+            return f"❌ 保存失败: {str(e)}", gr.update()
+
+    @staticmethod
+    def load_manual_outline(username, outline_file):
+        if not username or not outline_file:
+            return gr.update(), "❌ 尚未选择大纲文件"
+
+        filepath = os.path.join("BOOKS", username, "outline", outline_file)
+        if not os.path.exists(filepath):
+            return gr.update(), f"❌ 找不到文件: {outline_file}"
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return gr.update(value=data), f"✅ 成功加载大纲: {outline_file}"
+        except Exception as e:
+            return gr.update(), f"❌ 读取失败: {e}"
 
 
 # ==========================================
@@ -943,6 +992,18 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
                 with gr.Accordion("📝 人工制定各章大纲模式 (可选)", open=False):
                     use_manual_outline = gr.Checkbox(label="启用人工输入大纲",
                                                      value=init_conf.get("use_manual_outline", False))
+
+                    # === 新增：大纲保存与加载功能 ===
+                    with gr.Row():
+                        outline_dropdown = gr.Dropdown(label="加载本地大纲", choices=[], interactive=True)
+                        btn_load_outline = gr.Button("📂 加载", size="sm")
+                        btn_refresh_outlines = gr.Button("🔄 刷新", size="sm")
+                    with gr.Row():
+                        outline_save_name = gr.Textbox(label="输入大纲名称 (用于保存)", placeholder="例如：第一卷细纲")
+                        btn_save_outline = gr.Button("💾 保存到本地", variant="primary", size="sm")
+                    outline_op_msg = gr.Markdown("")
+                    # ==================================
+
                     manual_outline_data = gr.Dataframe(
                         headers=["章节号", "章节名", "章节概要"],
                         datatype=["number", "str", "str"],
@@ -1147,12 +1208,35 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
     )
 
     btn_register.click(UserManager.register, inputs=[input_user, input_pwd], outputs=[auth_msg])
+
+    # 登录时触发操作
     btn_login.click(UserManager.login, inputs=[input_user, input_pwd],
                     outputs=[auth_msg, user_state, login_group, main_group, welcome_text])
     btn_login.click(FileManager.get_user_books, inputs=[input_user], outputs=[book_select])
     btn_login.click(on_user_login, inputs=[input_user], outputs=dropdowns_list)
+    # 登录时也一并获取最新的大纲列表
+    btn_login.click(FileManager.get_manual_outlines, inputs=[input_user], outputs=[outline_dropdown])
+
     btn_logout.click(UserManager.logout, inputs=[],
                      outputs=[user_state, auth_msg, login_group, main_group, welcome_text])
+
+    # === 新增：大纲操作事件绑定 ===
+    btn_save_outline.click(
+        fn=FileManager.save_manual_outline,
+        inputs=[user_state, outline_save_name, manual_outline_data],
+        outputs=[outline_op_msg, outline_dropdown]
+    )
+    btn_load_outline.click(
+        fn=FileManager.load_manual_outline,
+        inputs=[user_state, outline_dropdown],
+        outputs=[manual_outline_data, outline_op_msg]
+    )
+    btn_refresh_outlines.click(
+        fn=FileManager.get_manual_outlines,
+        inputs=[user_state],
+        outputs=[outline_dropdown]
+    )
+    # ==============================
 
     btn_save.click(fn=lambda *args: save_config_json(build_config_dict(*args)), inputs=all_inputs, outputs=[sys_msg])
     btn_start.click(fn=start_generation, inputs=[user_state] + all_inputs, outputs=[log_output, btn_pause])
