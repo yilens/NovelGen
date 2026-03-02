@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="c9e4911f-6de8-433b-981e-7aac7c7f3429" name="更改" comment="v0.2.8 添加人工输入大纲">
+    <list default="true" id="c9e4911f-6de8-433b-981e-7aac7c7f3429" name="更改" comment="v0.3.0 每个agent都配置专属json">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
@@ -263,7 +263,23 @@
       <option name="project" value="LOCAL" />
       <updated>1772452081717</updated>
     </task>
-    <option name="localTasksCounter" value="26" />
+    <task id="LOCAL-00026" summary="v0.2.9 修改配置文件">
+      <option name="closed" value="true" />
+      <created>1772457710816</created>
+      <option name="number" value="00026" />
+      <option name="presentableId" value="LOCAL-00026" />
+      <option name="project" value="LOCAL" />
+      <updated>1772457710816</updated>
+    </task>
+    <task id="LOCAL-00027" summary="v0.3.0 每个agent都配置专属json">
+      <option name="closed" value="true" />
+      <created>1772459578961</created>
+      <option name="number" value="00027" />
+      <option name="presentableId" value="LOCAL-00027" />
+      <option name="project" value="LOCAL" />
+      <updated>1772459578961</updated>
+    </task>
+    <option name="localTasksCounter" value="28" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -298,6 +314,8 @@
     <MESSAGE value="v0.2.6 添加用户、文件管理功能" />
     <MESSAGE value="v0.2.7 添加API参数设置，agent专属api" />
     <MESSAGE value="v0.2.8 添加人工输入大纲" />
-    <option name="LAST_COMMIT_MESSAGE" value="v0.2.8 添加人工输入大纲" />
+    <MESSAGE value="v0.2.9 修改配置文件" />
+    <MESSAGE value="v0.3.0 每个agent都配置专属json" />
+    <option name="LAST_COMMIT_MESSAGE" value="v0.3.0 每个agent都配置专属json" />
   </component>
 </project>
