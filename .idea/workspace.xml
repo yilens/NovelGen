@@ -4,7 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="c9e4911f-6de8-433b-981e-7aac7c7f3429" name="更改" comment="v0.2.4 改为webui">
+    <list default="true" id="c9e4911f-6de8-433b-981e-7aac7c7f3429" name="更改" comment="v0.2.6 添加用户、文件管理功能">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -41,6 +42,7 @@
 }</component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="C:\Users\19389\PycharmProjects\PythonProject2\BOOKS\HeZijing" />
       <recent name="C:\Users\19389\PycharmProjects\PythonProject2\" />
       <recent name="C:\Users\19389\PycharmProjects\PythonProject2\novel_data\api" />
       <recent name="C:\Users\19389\PycharmProjects\PythonProject2\novel_data\backup" />
@@ -213,7 +215,23 @@
       <option name="project" value="LOCAL" />
       <updated>1772427467905</updated>
     </task>
-    <option name="localTasksCounter" value="20" />
+    <task id="LOCAL-00020" summary="v0.2.5 添加下载功能">
+      <option name="closed" value="true" />
+      <created>1772427557824</created>
+      <option name="number" value="00020" />
+      <option name="presentableId" value="LOCAL-00020" />
+      <option name="project" value="LOCAL" />
+      <updated>1772427557824</updated>
+    </task>
+    <task id="LOCAL-00021" summary="v0.2.6 添加用户、文件管理功能">
+      <option name="closed" value="true" />
+      <created>1772428338911</created>
+      <option name="number" value="00021" />
+      <option name="presentableId" value="LOCAL-00021" />
+      <option name="project" value="LOCAL" />
+      <updated>1772428338911</updated>
+    </task>
+    <option name="localTasksCounter" value="22" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -244,6 +262,8 @@
     <MESSAGE value="v0.2.3 新增检视意见按钮" />
     <MESSAGE value="v0.2.3 新增护盾" />
     <MESSAGE value="v0.2.4 改为webui" />
-    <option name="LAST_COMMIT_MESSAGE" value="v0.2.4 改为webui" />
+    <MESSAGE value="v0.2.5 添加下载功能" />
+    <MESSAGE value="v0.2.6 添加用户、文件管理功能" />
+    <option name="LAST_COMMIT_MESSAGE" value="v0.2.6 添加用户、文件管理功能" />
   </component>
 </project>
