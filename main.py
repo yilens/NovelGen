@@ -29,6 +29,7 @@ ROLE_MAP = {
     "清洗者": "cleaner"
 }
 
+
 # ==========================================
 # 数据与文件管理模块
 # ==========================================
@@ -159,6 +160,7 @@ class AgentWorkflow:
 
         self._init_directories()
         self._load_local_data()
+        self._init_manual_outline()
 
     def _init_directories(self):
         raw_title = self.config.get("book_title", "未命名小说").strip()
@@ -185,6 +187,33 @@ class AgentWorkflow:
                     self.log(f"已读取进度文件，将从 第 {self.current_chapter} 章 开始续写。")
             except Exception as e:
                 self.log(f"⚠️ 读取进度文件异常: {e}，将默认从第1章开始。")
+
+    def _init_manual_outline(self):
+        """初始化人工大纲数据映射"""
+        self.use_manual = self.config.get("use_manual_outline", False)
+        self.manual_dict = {}
+        self.max_manual_chapter = 0
+
+        if self.use_manual:
+            raw_data = self.config.get("manual_outline_data", [])
+            for row in raw_data:
+                # 过滤无效空行
+                if not row or len(row) < 3: continue
+                try:
+                    c_num = int(row[0])
+                    c_name = str(row[1]).strip()
+                    c_sum = str(row[2]).strip()
+                    if c_num > 0 and (c_name or c_sum):
+                        self.manual_dict[c_num] = {"name": c_name, "summary": c_sum}
+                except:
+                    continue
+
+            if self.manual_dict:
+                self.max_manual_chapter = max(self.manual_dict.keys())
+                self.log(
+                    f"✅ 已启用人工大纲模式，成功加载 {len(self.manual_dict)} 章大纲数据，目标完结章：第 {self.max_manual_chapter} 章")
+            else:
+                self.log("⚠️ 警告：启用了人工大纲模式，但表格中没有提取到有效的章节数据！请检查表格填写。")
 
     def save_local_data(self):
         with open(self.full_volume_file, "w", encoding="utf-8") as f:
@@ -357,7 +386,8 @@ class AgentWorkflow:
             return self.call_llm(prompt, role, use_fallback=False, history_text=history_text)
         return None
 
-    def _call_gemini(self, api_key, model_name, sys_inst, final_prompt, model_intro, history_text, temperature, top_p, top_k):
+    def _call_gemini(self, api_key, model_name, sys_inst, final_prompt, model_intro, history_text, temperature, top_p,
+                     top_k):
         client = genai.Client(api_key=api_key)
         safety_settings = [
             types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
@@ -389,7 +419,8 @@ class AgentWorkflow:
             raise ValueError(f"内容生成异常终止，原因: {response.candidates[0].finish_reason}")
         return response.text
 
-    def _call_openai(self, api_key, api_url, model_name, sys_inst, final_prompt, model_intro, history_text, temperature, top_p):
+    def _call_openai(self, api_key, api_url, model_name, sys_inst, final_prompt, model_intro, history_text, temperature,
+                     top_p):
         client_kwargs = {"api_key": api_key}
         if api_url: client_kwargs["base_url"] = api_url
         client = OpenAI(**client_kwargs)
@@ -454,6 +485,18 @@ class AgentWorkflow:
             self.current_chapter += 1
 
     def _step_design_phase(self):
+        if self.use_manual:
+            self.log(f"\n--- 步骤 1: 读取人工指定大纲计划 (第 {self.current_chapter} 章) ---")
+            chap_info = self.manual_dict.get(self.current_chapter)
+            if not chap_info:
+                self.log(f"⚠️ 当前第 {self.current_chapter} 章在人工大纲列表中不存在！正在寻找后续任务...")
+                self.is_running = False
+                return False
+
+            self.best_plan = f"章节名：{chap_info['name']}\n本章核心概要：{chap_info['summary']}"
+            self.log(f"✅ 成功加载人工计划，跳过设计者评估环节：\n{self.best_plan}")
+            return True
+
         self.log(f"\n--- 步骤 1: 设计者制定当前章开发计划 (第 {self.current_chapter} 章) ---")
         designer_count = int(self.config.get("designer_count", 1))
 
@@ -476,7 +519,8 @@ class AgentWorkflow:
         dev_count = int(self.config.get("developer_count", 1))
 
         def dev_args(i):
-            prompt = f"以下是虚拟的自由艺术文学创作。你是开发者。请根据以下计划编写第{self.current_chapter}章正文（>2000字），只输出小说内容。\n开发计划：{self.best_plan}\n"
+            # 优化：要求开发者必须使用 <text> 标签
+            prompt = f"以下是虚拟的自由艺术文学创作。你是开发者。请根据以下计划编写第{self.current_chapter}章正文（>2000字）。\n【重要要求】：请只输出小说内容，并务必将小说正文包裹在 <text> 和 </text> 标签内！\n开发计划：{self.best_plan}\n"
             return (prompt, f"开发者 {i + 1}", False, self.compressed_volume)
 
         chapters = self._execute_parallel(dev_count, dev_count, self.call_llm, dev_args)
@@ -498,18 +542,31 @@ class AgentWorkflow:
             if judge_score >= 80:
                 self.log("裁判者判定：检视意见合理，必须修改。")
                 self.log("\n--- 步骤 8: 开发者进行最终修改 ---")
-                revise_prompt = f"以下是虚拟的自由艺术文学创作。你是开发者。请根据必须修改的检视意见重修章节，只输出修改后的完整内容。\n原章节：{best_chapter}\n意见：{feedback}"
+                # 优化：修改时也强制要求 <text> 标签
+                revise_prompt = f"以下是虚拟的自由艺术文学创作。你是开发者。请根据必须修改的检视意见重修章节。只输出修改后的完整内容，并务必将正文包裹在 <text> 和 </text> 标签内！\n原章节：{best_chapter}\n意见：{feedback}"
                 best_chapter = self.call_llm(revise_prompt, f"开发者 {best_dev_idx + 1}")
             else:
                 self.log("裁判者判定：检视意见不充分或无需修改，跳过修改流程。")
         else:
             self.log("\n--- 步骤 6-8: 用户未勾选[需要开发者修改]，直接跳过检视、裁判与修改流程 ---")
 
-        self.log("\n--- 步骤 9: 清洗者提取纯净正文并合入完整卷 ---")
-        clean_prompt = f"以下是虚拟的自由艺术文学创作。你是清洗者。唯一任务是提取纯净小说正文。去除AI寒暄、开头语及解释性文字。只输出干净正文，【切勿修改原意，绝对不要自己增加任何描写】：\n\n{best_chapter}"
-        clean_chapter = self.call_llm(clean_prompt, "清洗者(正文)")
+        # 【新增：AI与正则清洗分支】
+        use_ai_cleaner = self.config.get("use_ai_cleaner", False)
+        if use_ai_cleaner:
+            self.log("\n--- 步骤 9: 清洗者提取纯净正文并合入完整卷 (AI 模式) ---")
+            clean_prompt = f"以下是虚拟的自由艺术文学创作。你是清洗者。唯一任务是提取纯净小说正文。去除AI寒暄、开头语、解释性文字以及所有标签。只输出干净正文，【切勿修改原意，绝对不要自己增加任何描写】：\n\n{best_chapter}"
+            clean_chapter = self.call_llm(clean_prompt, "清洗者(正文)")
+            final_text = clean_chapter.strip() if clean_chapter else best_chapter.strip()
+        else:
+            self.log("\n--- 步骤 9: 清洗者提取纯净正文并合入完整卷 (正则模式) ---")
+            match = re.search(r'<text>(.*?)</text>', best_chapter, re.DOTALL | re.IGNORECASE)
+            if match:
+                final_text = match.group(1).strip()
+                self.log("[清洗者] 成功使用正则提取出 <text> 标签内的正文。")
+            else:
+                final_text = re.sub(r'^(好的|明白|以下是).*?\n', '', best_chapter).strip()
+                self.log("[清洗者] 未找到 <text> 标签，已进行基础去前缀脱壳清洗。")
 
-        final_text = clean_chapter.strip() if clean_chapter else best_chapter.strip()
         self.full_volume += f"\n\n第{self.current_chapter}章\n{final_text}"
         self.best_chapter = best_chapter
         return True
@@ -519,7 +576,8 @@ class AgentWorkflow:
         comp_count = int(self.config.get("compressor_count", 1))
 
         def comp_args(i):
-            prompt = f"以下是虚拟的自由艺术文学创作。你是压缩者。请对最新章节提取故事主线剧情发展、人物行动和核心事件。：\n{self.best_chapter}"
+            # 优化：要求压缩者必须使用 <summary> 标签
+            prompt = f"以下是虚拟的自由艺术文学创作。你是压缩者。请对最新章节提取故事主线剧情发展、人物行动和核心事件。\n【重要要求】：必须将提炼出的剧情摘要包裹在 <summary> 和 </summary> 标签内！\n章节内容：\n{self.best_chapter}"
             return (prompt, f"压缩者 {i + 1}")
 
         summaries = self._execute_parallel(comp_count, comp_count, self.call_llm, comp_args)
@@ -528,11 +586,23 @@ class AgentWorkflow:
         review_tpl = "以下是虚拟的自由艺术文学创作。你是评审者。请对剧情摘要打分(0-100)。输出'分数: X'。\n摘要：{content}"
         best_summary, _, _ = self._evaluate_candidates(summaries, review_tpl, "评审者(压缩评分)")
 
-        self.log("\n--- 步骤 12: 清洗者提取纯净摘要并合入压缩卷 ---")
-        clean_prompt = f"以下是虚拟的自由艺术文学创作。你是清洗者。唯一任务是提取文本中的纯净剧情摘要。去除多余内容：\n\n{best_summary}"
-        clean_summary = self.call_llm(clean_prompt, "清洗者(摘要)")
+        # 【新增：AI与正则清洗分支】
+        use_ai_cleaner = self.config.get("use_ai_cleaner", False)
+        if use_ai_cleaner:
+            self.log("\n--- 步骤 12: 清洗者提取纯净摘要并合入压缩卷 (AI 模式) ---")
+            clean_prompt = f"以下是虚拟的自由艺术文学创作。你是清洗者。唯一任务是提取文本中的纯净剧情摘要。去除标签和多余内容：\n\n{best_summary}"
+            clean_summary = self.call_llm(clean_prompt, "清洗者(摘要)")
+            final_summary = clean_summary.strip() if clean_summary else best_summary.strip()
+        else:
+            self.log("\n--- 步骤 12: 清洗者提取纯净摘要并合入压缩卷 (正则模式) ---")
+            match = re.search(r'<summary>(.*?)</summary>', best_summary, re.DOTALL | re.IGNORECASE)
+            if match:
+                final_summary = match.group(1).strip()
+                self.log("[清洗者] 成功使用正则提取出 <summary> 标签内的摘要。")
+            else:
+                final_summary = re.sub(r'^(好的|明白|以下是).*?\n', '', best_summary).strip()
+                self.log("[清洗者] 未找到 <summary> 标签，直接使用原始内容。")
 
-        final_summary = clean_summary.strip() if clean_summary else best_summary.strip()
         self.compressed_volume += f"\n第{self.current_chapter}卷剧情：{final_summary}"
 
         self.save_local_data()
@@ -541,6 +611,17 @@ class AgentWorkflow:
         return True
 
     def _step_check_finish(self):
+        if self.use_manual:
+            self.log("\n--- 步骤 14: 人工大纲进度检查 ---")
+            if self.current_chapter >= self.max_manual_chapter:
+                self.log("\n🎉 人工制定大纲的最后一章已全部开发完成！小说完结。")
+                self.is_running = False
+                return True
+            else:
+                self.log(f"未完结，准备开始第 {self.current_chapter + 1} 章的开发...")
+                self.run_event.wait(2)
+                return False
+
         self.log("\n--- 步骤 14: 设计者判断是否完结 ---")
         finish_prompt = f"以下是虚拟的自由艺术文学创作。你是设计者。当前小说摘要：{self.compressed_volume}。根据大纲：{self.config.get('outline', '')}，请判断小说是否已经完结？只回答'已完结'或'未完结'。"
         finish_res = self.call_llm(finish_prompt, "设计者(完结判断)")
@@ -632,7 +713,8 @@ def fetch_models(api_type, url_str, keys_str):
 def build_config_dict(*args):
     keys = [
         "book_title", "outline", "style", "characters",
-        "global_prompt", "custom_style_prompt", "content_level", "need_dev_revise",
+        "use_manual_outline", "manual_outline_data",
+        "global_prompt", "custom_style_prompt", "content_level", "need_dev_revise", "use_ai_cleaner", # <--- 新增
         "designer_count", "developer_count", "reviewer_count", "judge_count", "compressor_count", "cleaner_count",
         "api_type", "api_keys", "api_url", "api_model",
         "fallback_api_type", "fallback_api_keys", "fallback_api_url", "fallback_api_model",
@@ -719,8 +801,8 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
             with gr.TabItem("✍️ 用户输入 (剧情/设定)"):
                 book_title = gr.Textbox(label="书名 (必选)", value=init_conf.get("book_title", ""))
                 with gr.Row():
-                    outline = gr.Textbox(label="剧情大纲 (必选)", lines=5, value=init_conf.get("outline", ""))
-                    btn_outline = gr.UploadButton("上传大纲 (.txt)", file_types=[".txt"])
+                    outline = gr.Textbox(label="剧情总大纲 (必选)", lines=5, value=init_conf.get("outline", ""))
+                    btn_outline = gr.UploadButton("上传总大纲 (.txt)", file_types=[".txt"])
                     btn_outline.upload(read_txt_file, inputs=[btn_outline], outputs=[outline])
                 with gr.Row():
                     style = gr.Textbox(label="剧情风格 (可选)", lines=3, value=init_conf.get("style", ""))
@@ -730,6 +812,22 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
                     characters = gr.Textbox(label="人物列表 (可选)", lines=3, value=init_conf.get("characters", ""))
                     btn_char = gr.UploadButton("上传人物 (.txt)", file_types=[".txt"])
                     btn_char.upload(read_txt_file, inputs=[btn_char], outputs=[characters])
+
+                with gr.Accordion("📝 人工制定各章大纲模式 (可选)", open=False):
+                    use_manual_outline = gr.Checkbox(
+                        label="启用人工输入大纲 (勾选后将取消AI自动设计各章大纲，并以这里的最后一张作为小说完结条件)",
+                        value=init_conf.get("use_manual_outline", False))
+                    manual_outline_data = gr.Dataframe(
+                        headers=["章节号 (支持阿拉伯数字)", "章节名", "章节概要"],
+                        datatype=["number", "str", "str"],
+                        col_count=(3, "fixed"),
+                        row_count=(1, "dynamic"),
+                        value=init_conf.get("manual_outline_data", [[1, "", ""]]),
+                        interactive=True,
+                        type="array",
+                        label="（如果开启上方勾选框）请在下方输入各章详细大纲。如果无法直接添加，请点击下方的按钮"
+                    )
+                    btn_add_manual_row = gr.Button("➕ 新增一章大纲", size="sm")
 
             # Tab 2: 开发组设置
             with gr.TabItem("⚙️ 开发组设置 (数量/提示词)"):
@@ -744,6 +842,10 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
                                                  value=init_conf.get("content_level", "Normal"))
                         need_dev_revise = gr.Checkbox(label="需要开发者修改 (触发检视/裁判环节)",
                                                       value=init_conf.get("need_dev_revise", False))
+                        # 新增：是否启用AI清洗者的复选框
+                        use_ai_cleaner = gr.Checkbox(label="启用 AI 清洗者 (不勾选则使用正则快速提取)",
+                                                     value=init_conf.get("use_ai_cleaner", False))
+
                 gr.Markdown("### Agent 数量配置")
                 with gr.Row():
                     designer_count = gr.Number(label="设计者数量", value=int(init_conf.get("designer_count", 1)),
@@ -763,7 +865,8 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
             with gr.TabItem("🔑 API 配置"):
                 with gr.Accordion("⚙️ 模型生成参数 (默认均衡值)", open=False):
                     with gr.Row():
-                        temperature = gr.Slider(0.0, 2.0, value=float(init_conf.get("temperature", 0.7)), step=0.1, label="Temperature (温度)")
+                        temperature = gr.Slider(0.0, 2.0, value=float(init_conf.get("temperature", 0.7)), step=0.1,
+                                                label="Temperature (温度)")
                         top_p = gr.Slider(0.0, 1.0, value=float(init_conf.get("top_p", 0.9)), step=0.05, label="Top P")
                         top_k = gr.Slider(1, 100, value=int(init_conf.get("top_k", 40)), step=1, label="Top K")
 
@@ -811,11 +914,18 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
                         for zh_name, en_name in agent_names_map:
                             with gr.TabItem(f"{zh_name}"):
                                 with gr.Row():
-                                    a_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label=f"{zh_name} API 类型", value=init_conf.get(f"{en_name}_api_type", "Gemini"))
-                                    a_keys = gr.Textbox(label=f"{zh_name} API Keys (留空则用主API)", type="password", value=init_conf.get(f"{en_name}_api_keys", ""))
+                                    a_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label=f"{zh_name} API 类型",
+                                                         value=init_conf.get(f"{en_name}_api_type", "Gemini"))
+                                    a_keys = gr.Textbox(label=f"{zh_name} API Keys (留空则用主API)", type="password",
+                                                        value=init_conf.get(f"{en_name}_api_keys", ""))
                                 with gr.Row():
-                                    a_url = gr.Textbox(label=f"{zh_name} API URL", value=init_conf.get(f"{en_name}_api_url", ""))
-                                    a_model = gr.Dropdown(label=f"{zh_name} API 模型", choices=[init_conf.get(f"{en_name}_api_model", "gemini-2.5-flash")], value=init_conf.get(f"{en_name}_api_model", "gemini-2.5-flash"), allow_custom_value=True)
+                                    a_url = gr.Textbox(label=f"{zh_name} API URL",
+                                                       value=init_conf.get(f"{en_name}_api_url", ""))
+                                    a_model = gr.Dropdown(label=f"{zh_name} API 模型", choices=[
+                                        init_conf.get(f"{en_name}_api_model", "gemini-2.5-flash")],
+                                                          value=init_conf.get(f"{en_name}_api_model",
+                                                                              "gemini-2.5-flash"),
+                                                          allow_custom_value=True)
                                 agent_api_inputs.extend([a_type, a_keys, a_url, a_model])
 
             # Tab 4: 控制台 & 日志
@@ -838,16 +948,28 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
                 fm_msg = gr.Textbox(label="文件操作状态", interactive=False)
                 fm_download_file = gr.File(label="获取成功！点击下载压缩包", interactive=False, visible=False)
 
+    # 在所有输入中增加 use_ai_cleaner (注意要和 build_config_dict 的顺序完全对应！)
     all_inputs = [
-        book_title, outline, style, characters,
-        global_prompt, custom_style_prompt, content_level, need_dev_revise,
-        designer_count, developer_count, reviewer_count, judge_count, compressor_count, cleaner_count,
-        api_type, api_keys, api_url, api_model,
-        fallback_api_type, fallback_api_keys, fallback_api_url, fallback_api_model,
-        temperature, top_p, top_k
-    ] + agent_api_inputs
+                     book_title, outline, style, characters,
+                     use_manual_outline, manual_outline_data,
+                     global_prompt, custom_style_prompt, content_level, need_dev_revise, use_ai_cleaner,
+                     designer_count, developer_count, reviewer_count, judge_count, compressor_count, cleaner_count,
+                     api_type, api_keys, api_url, api_model,
+                     fallback_api_type, fallback_api_keys, fallback_api_url, fallback_api_model,
+                     temperature, top_p, top_k
+                 ] + agent_api_inputs
+
 
     # --- 事件绑定 ---
+    def add_row_to_df(df_data):
+        if not df_data:
+            df_data = []
+        next_chapter_num = len(df_data) + 1
+        df_data.append([next_chapter_num, "", ""])
+        return df_data
+
+
+    btn_add_manual_row.click(fn=add_row_to_df, inputs=[manual_outline_data], outputs=[manual_outline_data])
     btn_register.click(UserManager.register, inputs=[input_user, input_pwd], outputs=[auth_msg])
     btn_login.click(UserManager.login, inputs=[input_user, input_pwd],
                     outputs=[auth_msg, user_state, login_group, main_group, welcome_text])
