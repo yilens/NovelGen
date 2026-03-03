@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="c9e4911f-6de8-433b-981e-7aac7c7f3429" name="更改" comment="v0.3.1 人工大纲本地保存">
+    <list default="true" id="c9e4911f-6de8-433b-981e-7aac7c7f3429" name="更改" comment="v0.3.4 新增 归档者">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
@@ -305,7 +305,39 @@
       <option name="project" value="LOCAL" />
       <updated>1772466943713</updated>
     </task>
-    <option name="localTasksCounter" value="31" />
+    <task id="LOCAL-00031" summary="v0.3.2 目录整改">
+      <option name="closed" value="true" />
+      <created>1772537441538</created>
+      <option name="number" value="00031" />
+      <option name="presentableId" value="LOCAL-00031" />
+      <option name="project" value="LOCAL" />
+      <updated>1772537441538</updated>
+    </task>
+    <task id="LOCAL-00032" summary="v0.3.3 每个用户都使用单独的人物配置">
+      <option name="closed" value="true" />
+      <created>1772541897091</created>
+      <option name="number" value="00032" />
+      <option name="presentableId" value="LOCAL-00032" />
+      <option name="project" value="LOCAL" />
+      <updated>1772541897091</updated>
+    </task>
+    <task id="LOCAL-00033" summary="v0.3.4 新增 归档者">
+      <option name="closed" value="true" />
+      <created>1772542496335</created>
+      <option name="number" value="00033" />
+      <option name="presentableId" value="LOCAL-00033" />
+      <option name="project" value="LOCAL" />
+      <updated>1772542496335</updated>
+    </task>
+    <task id="LOCAL-00034" summary="v0.3.4 新增 归档者">
+      <option name="closed" value="true" />
+      <created>1772542912660</created>
+      <option name="number" value="00034" />
+      <option name="presentableId" value="LOCAL-00034" />
+      <option name="project" value="LOCAL" />
+      <updated>1772542912660</updated>
+    </task>
+    <option name="localTasksCounter" value="35" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -320,8 +352,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="v0.1" />
-    <MESSAGE value="v0.11" />
     <MESSAGE value="v0.12" />
     <MESSAGE value="v0.13 增加R18模式" />
     <MESSAGE value="v0.14 增加R16模式" />
@@ -344,6 +374,9 @@
     <MESSAGE value="v0.3.0 每个agent都配置专属json" />
     <MESSAGE value="v0.3.1 开发者读取前三章完整正文" />
     <MESSAGE value="v0.3.1 人工大纲本地保存" />
-    <option name="LAST_COMMIT_MESSAGE" value="v0.3.1 人工大纲本地保存" />
+    <MESSAGE value="v0.3.2 目录整改" />
+    <MESSAGE value="v0.3.3 每个用户都使用单独的人物配置" />
+    <MESSAGE value="v0.3.4 新增 归档者" />
+    <option name="LAST_COMMIT_MESSAGE" value="v0.3.4 新增 归档者" />
   </component>
 </project>

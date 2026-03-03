@@ -10,6 +10,7 @@ import random
 import shutil
 import mode  # 引入自定义的mode模块
 from concurrent.futures import ThreadPoolExecutor
+from typing import List
 from google import genai
 from google.genai import types
 from openai import OpenAI
@@ -20,7 +21,7 @@ from openai import OpenAI
 CONFIG_FILE = "user_input.json"
 USER_DB_FILE = "users_db.json"
 MAX_API_RETRIES = 10
-RECENT_CHAPTERS_COUNT = 3  # ✅ 新增：代表暂存并发给开发者的完整章节章数
+RECENT_CHAPTERS_COUNT = 3  # 代表暂存并发给开发者的完整章节章数
 
 ROLE_MAP = {
     "设计者": "designer",
@@ -29,11 +30,21 @@ ROLE_MAP = {
     "裁判者": "judge",
     "压缩者": "compressor",
     "清洗者": "cleaner",
-    "归档者": "archiver"  # ✅ 新增归档者映射
+    "归档者": "archiver"
 }
 
+AGENT_NAMES_MAP = [
+    ("设计者", "designer", "Designer_R18.json"),
+    ("开发者", "developer", "Developer_R18.json"),
+    ("评审者", "reviewer", "Reviewer_R18.json"),
+    ("裁判者", "judge", "Judger_R18.json"),
+    ("压缩者", "compressor", "Compressor_R18.json"),
+    ("清洗者", "cleaner", "Cleaner_R18.json"),
+    ("归档者", "archiver", "Archiver_R18.json")
+]
 
-def get_all_modes(username):
+
+def get_all_modes(username: str) -> List[str]:
     """获取指定用户的所有可用配置文件"""
     if not username: return []
     mode_dir = os.path.join("NovelGen", username, "modes")
@@ -46,7 +57,6 @@ def get_all_modes(username):
 # ==========================================
 class UserManager:
     """管理用户注册、登录与数据存储"""
-
     @staticmethod
     def load_users() -> dict:
         if os.path.exists(USER_DB_FILE):
@@ -86,13 +96,12 @@ class UserManager:
 
 class ModeManager:
     """管理自定义角色扮演/系统指令模式预设"""
-
     @staticmethod
     def save_mode(username, mode_name, sys_prompt, intro, history_data):
         if not username:
-            return "❌ 请先登录", *[gr.update() for _ in range(7)]  # 增加返回值数量对齐下拉框
+            return "❌ 请先登录", *[gr.update() for _ in range(len(AGENT_NAMES_MAP))]
         if not mode_name or not mode_name.strip():
-            return "❌ 配置名不能为空", *[gr.update() for _ in range(7)]
+            return "❌ 配置名不能为空", *[gr.update() for _ in range(len(AGENT_NAMES_MAP))]
 
         mode_dir = os.path.join("NovelGen", username, "modes")
         os.makedirs(mode_dir, exist_ok=True)
@@ -117,12 +126,11 @@ class ModeManager:
             json.dump(mode_data, f, ensure_ascii=False, indent=4)
 
         modes = get_all_modes(username)
-        return f"✅ 预设 [{safe_name}] 保存成功！", *[gr.update(choices=modes) for _ in range(7)]
+        return f"✅ 预设 [{safe_name}] 保存成功！", *[gr.update(choices=modes) for _ in range(len(AGENT_NAMES_MAP))]
 
 
 class FileManager:
     """管理书籍及配置文件的读写、导出与删除"""
-
     @staticmethod
     def get_user_books(username):
         if not username: return gr.update(choices=[], value=None)
@@ -267,11 +275,83 @@ class FileManager:
 
 
 # ==========================================
-# 核心业务对象与工作流
+# API 客户端服务层
 # ==========================================
+class LLMService:
+    """封装大语言模型的底层 API 调用逻辑"""
+    @staticmethod
+    def call_gemini(api_key: str, model_name: str, sys_inst: str, final_prompt: str, model_intro: str, pre_history: list, history_text: str, temperature: float, top_p: float, top_k: int) -> str:
+        client = genai.Client(api_key=api_key)
+        safety_settings = [
+            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+        ]
+        config = types.GenerateContentConfig(
+            system_instruction=sys_inst,
+            safety_settings=safety_settings,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k
+        )
+        contents = [
+            types.Content(role="user", parts=[types.Part.from_text(text="自我介绍一下。")]),
+            types.Content(role="model", parts=[types.Part.from_text(text=model_intro)])
+        ]
+
+        if pre_history:
+            for turn in pre_history:
+                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=turn["user"])]))
+                contents.append(types.Content(role="model", parts=[types.Part.from_text(text=turn["model"])]))
+
+        if history_text and history_text.strip():
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text="回顾一下之前的剧情。")]))
+            contents.append(types.Content(role="model", parts=[
+                types.Part.from_text(text=f"下面是我之前已经完成的剧情摘要：\n{history_text}")]))
+
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=final_prompt)]))
+        response = client.models.generate_content(model=model_name, contents=contents, config=config)
+
+        if not response.candidates: raise ValueError("API未返回任何候选结果(可能被平台安全拦截或网络异常)")
+        if response.candidates[0].finish_reason and "STOP" not in str(response.candidates[0].finish_reason):
+            raise ValueError(f"内容生成异常终止，原因: {response.candidates[0].finish_reason}")
+        return response.text
+
+    @staticmethod
+    def call_openai(api_key: str, api_url: str, model_name: str, sys_inst: str, final_prompt: str, model_intro: str, pre_history: list, history_text: str, temperature: float, top_p: float) -> str:
+        client_kwargs = {"api_key": api_key}
+        if api_url: client_kwargs["base_url"] = api_url
+        client = OpenAI(**client_kwargs)
+
+        messages = [
+            {"role": "system", "content": sys_inst},
+            {"role": "user", "content": "自我介绍一下。"},
+            {"role": "assistant", "content": model_intro}
+        ]
+
+        if pre_history:
+            for turn in pre_history:
+                messages.append({"role": "user", "content": turn["user"]})
+                messages.append({"role": "assistant", "content": turn["model"]})
+
+        if history_text and history_text.strip():
+            messages.append({"role": "user", "content": "你之前写了哪些剧情？请在接下来的任务中牢记这些前置剧情。"})
+            messages.append({"role": "assistant",
+                             "content": f"明白，以下是我之前已经完成的剧情摘要，我会基于此继续推进：\n{history_text}"})
+
+        messages.append({"role": "user", "content": final_prompt})
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=temperature,
+            top_p=top_p
+        )
+        return response.choices[0].message.content
+
+
 class APIKeyManager:
     """管理 API Key 的轮询机制"""
-
     def __init__(self):
         self.indices = {}
         self.lock = threading.Lock()
@@ -289,6 +369,9 @@ class APIKeyManager:
         return key
 
 
+# ==========================================
+# 核心业务对象与工作流
+# ==========================================
 class AgentWorkflow:
     def __init__(self, config, username, log_callback):
         self.config = config
@@ -315,7 +398,6 @@ class AgentWorkflow:
         self.full_volume_file = os.path.join(self.book_dir, f"{self.book_title}_full_volume.txt")
         self.compressed_volume_file = os.path.join(self.book_dir, f"{self.book_title}_compressed_volume.txt")
         self.state_file = os.path.join(self.book_dir, f"{self.book_title}_state.json")
-        # ✅ 初始化人物设定 JSON 文件路径
         self.role_file = os.path.join(self.book_dir, f"{self.book_title}_role.json")
 
     def _load_local_data(self):
@@ -344,7 +426,7 @@ class AgentWorkflow:
             except Exception as e:
                 self.log(f"⚠️ 读取进度文件异常: {e}，将默认从第1章开始。")
 
-        # ✅ 处理人物设定文件加载或初始化 (归档者负责维护)
+        # 处理人物设定文件加载或初始化
         if not os.path.exists(self.role_file):
             initial_chars = self.config.get("characters", "").strip()
             if initial_chars:
@@ -386,8 +468,7 @@ class AgentWorkflow:
 
             if self.manual_dict:
                 self.max_manual_chapter = max(self.manual_dict.keys())
-                self.log(
-                    f"✅ 已启用人工大纲模式，成功加载 {len(self.manual_dict)} 章大纲数据，目标完结章：第 {self.max_manual_chapter} 章")
+                self.log(f"✅ 已启用人工大纲模式，成功加载 {len(self.manual_dict)} 章大纲数据，目标完结章：第 {self.max_manual_chapter} 章")
             else:
                 self.log("⚠️ 警告：启用了人工大纲模式，但表格中没有提取到有效的章节数据！请检查表格填写。")
 
@@ -402,8 +483,7 @@ class AgentWorkflow:
         except Exception as e:
             self.log(f"⚠️ 保存进度文件失败: {e}")
 
-    def _save_error_log(self, role, conf, sys_inst, is_tool, model_intro, pre_history, final_prompt, history_text,
-                        error_msg):
+    def _save_error_log(self, role, conf, sys_inst, is_tool, model_intro, pre_history, final_prompt, history_text, error_msg):
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         safe_role = re.sub(r'[\\/:*?"<>| ]', '_', role)
         err_filepath = os.path.join(self.err_dir, f"err_{timestamp}_{safe_role}.txt")
@@ -462,16 +542,7 @@ class AgentWorkflow:
         is_developer = "开发者" in role
         style_suffix = f" 这是我的写作风格：\n{custom_style}" if (custom_style and is_developer) else ""
 
-        role_to_config_key = {
-            "设计者": "designer_mode",
-            "开发者": "developer_mode",
-            "评审者": "reviewer_mode",
-            "裁判者": "judge_mode",
-            "压缩者": "compressor_mode",
-            "清洗者": "cleaner_mode",
-            "归档者": "archiver_mode"  # ✅ 支持归档者预设配置加载
-        }
-        mode_key = role_to_config_key.get(base_role)
+        mode_key = f"{ROLE_MAP.get(base_role, '')}_mode"
         selected_mode_file = self.config.get(mode_key, "")
 
         mode_dir = os.path.join("NovelGen", self.username, "modes")
@@ -545,12 +616,9 @@ class AgentWorkflow:
                 api_key = self.key_manager.get_next_key(conf["api_keys_str"])
 
                 if conf["api_type"] == "Gemini":
-                    text = self._call_gemini(api_key, conf["model_name"], sys_inst, current_final_prompt, model_intro,
-                                             pre_history, history_text, temperature, top_p, top_k)
+                    text = LLMService.call_gemini(api_key, conf["model_name"], sys_inst, current_final_prompt, model_intro, pre_history, history_text, temperature, top_p, top_k)
                 elif conf["api_type"] == "OpenAI Compatible":
-                    text = self._call_openai(api_key, conf["api_url"], conf["model_name"], sys_inst,
-                                             current_final_prompt, model_intro, pre_history, history_text, temperature,
-                                             top_p)
+                    text = LLMService.call_openai(api_key, conf["api_url"], conf["model_name"], sys_inst, current_final_prompt, model_intro, pre_history, history_text, temperature, top_p)
                 else:
                     raise ValueError(f"未知的 API 类型: {conf['api_type']}")
 
@@ -563,8 +631,7 @@ class AgentWorkflow:
             except Exception as e:
                 error_msg = str(e)
                 self.log(f"[{role}] {conf['log_prefix']}❌ API调用异常: {error_msg}")
-                self._save_error_log(role, conf, sys_inst, is_tool, model_intro, pre_history, current_final_prompt,
-                                     history_text, error_msg)
+                self._save_error_log(role, conf, sys_inst, is_tool, model_intro, pre_history, current_final_prompt, history_text, error_msg)
 
                 if "API未返回任何候选结果(可能被平台安全拦截或网络异常)" in error_msg:
                     safety_block_count += 1
@@ -587,76 +654,6 @@ class AgentWorkflow:
             return self.call_llm(prompt, role, use_fallback=False, history_text=history_text)
         return None
 
-    def _call_gemini(self, api_key, model_name, sys_inst, final_prompt, model_intro, pre_history, history_text,
-                     temperature, top_p, top_k):
-        client = genai.Client(api_key=api_key)
-        safety_settings = [
-            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-        ]
-        config = types.GenerateContentConfig(
-            system_instruction=sys_inst,
-            safety_settings=safety_settings,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k
-        )
-        contents = [
-            types.Content(role="user", parts=[types.Part.from_text(text="自我介绍一下。")]),
-            types.Content(role="model", parts=[types.Part.from_text(text=model_intro)])
-        ]
-
-        if pre_history:
-            for turn in pre_history:
-                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=turn["user"])]))
-                contents.append(types.Content(role="model", parts=[types.Part.from_text(text=turn["model"])]))
-
-        if history_text and history_text.strip():
-            contents.append(types.Content(role="user", parts=[types.Part.from_text(text="回顾一下之前的剧情。")]))
-            contents.append(types.Content(role="model", parts=[
-                types.Part.from_text(text=f"下面是我之前已经完成的剧情摘要：\n{history_text}")]))
-
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=final_prompt)]))
-        response = client.models.generate_content(model=model_name, contents=contents, config=config)
-
-        if not response.candidates: raise ValueError("API未返回任何候选结果(可能被平台安全拦截或网络异常)")
-        if response.candidates[0].finish_reason and "STOP" not in str(response.candidates[0].finish_reason):
-            raise ValueError(f"内容生成异常终止，原因: {response.candidates[0].finish_reason}")
-        return response.text
-
-    def _call_openai(self, api_key, api_url, model_name, sys_inst, final_prompt, model_intro, pre_history, history_text,
-                     temperature, top_p):
-        client_kwargs = {"api_key": api_key}
-        if api_url: client_kwargs["base_url"] = api_url
-        client = OpenAI(**client_kwargs)
-
-        messages = [
-            {"role": "system", "content": sys_inst},
-            {"role": "user", "content": "自我介绍一下。"},
-            {"role": "assistant", "content": model_intro}
-        ]
-
-        if pre_history:
-            for turn in pre_history:
-                messages.append({"role": "user", "content": turn["user"]})
-                messages.append({"role": "assistant", "content": turn["model"]})
-
-        if history_text and history_text.strip():
-            messages.append({"role": "user", "content": "你之前写了哪些剧情？请在接下来的任务中牢记这些前置剧情。"})
-            messages.append({"role": "assistant",
-                             "content": f"明白，以下是我之前已经完成的剧情摘要，我会基于此继续推进：\n{history_text}"})
-
-        messages.append({"role": "user", "content": final_prompt})
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            temperature=temperature,
-            top_p=top_p
-        )
-        return response.choices[0].message.content
-
     def _extract_score(self, text):
         if not text: return 50
         match = re.search(r'(?:分数|Score|得分)[:：]?\s*(\d{1,3})', text, re.IGNORECASE)
@@ -671,16 +668,43 @@ class AgentWorkflow:
         if not candidates: return None, -1, 0
         if len(candidates) == 1: return candidates[0], 100, 0
 
-        def review_args(i):
-            return (review_prompt_tpl.format(content=candidates[i]), f"{reviewer_role} {i + 1}")
+        # 1. 真正读取并使用 UI 界面中配置的评审者数量
+        rev_count = int(self.config.get("reviewer_count", 1))
 
-        scores_text = self._execute_parallel(len(candidates), len(candidates), self.call_llm, review_args)
+        # 2. 总任务数 = 候选方案数量 × 每个方案需要的评审者数量
+        total_tasks = len(candidates) * rev_count
 
-        highest_score, best_idx = -1, 0
-        for i, res in enumerate(scores_text):
+        def review_args(index):
+            # 计算当前任务对应的是第几个候选方案，以及是该方案的第几个评审者
+            c_idx = index // rev_count
+            r_idx = index % rev_count
+            return (review_prompt_tpl.format(content=candidates[c_idx]),
+                    f"{reviewer_role}(方案{c_idx + 1}-{r_idx + 1})")
+
+        # 3. 执行并发请求
+        scores_text = self._execute_parallel(total_tasks, total_tasks, self.call_llm, review_args)
+
+        # 4. 汇总得分并计算平均分
+        candidate_scores = [0] * len(candidates)
+        for index, res in enumerate(scores_text):
+            c_idx = index // rev_count
             score = self._extract_score(res)
-            if score > highest_score:
-                highest_score, best_idx = score, i
+            candidate_scores[c_idx] += score
+
+        highest_score = -1
+        best_idx = 0
+
+        # 5. 找出平均分最高的候选方案
+        self.log(f"\n--- 评审结果汇总 ---")
+        for c_idx, total_score in enumerate(candidate_scores):
+            avg_score = total_score / rev_count
+            self.log(f"方案 {c_idx + 1} 获得 {rev_count} 位评审者打分，平均分: {avg_score:.1f}")
+            if avg_score > highest_score:
+                highest_score = avg_score
+                best_idx = c_idx
+
+        self.log(f"🏆 最终选用 方案 {best_idx + 1}\n--------------------------------------------------")
+
         return candidates[best_idx], highest_score, best_idx
 
     def run_loop(self):
@@ -711,7 +735,6 @@ class AgentWorkflow:
         designer_count = int(self.config.get("designer_count", 1))
 
         def plan_args(i):
-            # ✅ 改用动态维护的 self.current_characters 作为最新人物库
             prompt = f"以下是虚拟的自由艺术文学创作。你是小说剧情的设计者。大纲：{self.config.get('outline', '')}。风格：{self.config.get('style', '')}。人物：{self.current_characters}。\n任务：请**仅为当前第{self.current_chapter}章**制定简短精炼的剧情发展计划，只输出剧情发展计划。要求：\n1. 绝对不要编写后续章节的计划。\n2. 直接列出本章的3-4个核心情节节点。\n3. 语言必须简短扼要（总字数控制在300字以内）。\n4. 结尾留有悬念。"
             return (prompt, f"设计者 {i + 1}", False, self.compressed_volume)
 
@@ -785,7 +808,6 @@ class AgentWorkflow:
                 final_text = re.sub(r'^(好的|明白|以下是).*?\n', '', best_chapter).strip()
                 self.log("[清洗者] 未找到 <text> 标签，已进行基础去前缀脱壳清洗。")
 
-        # ✅ 新增：在合入完整卷前，判断是否启用了归档者
         if self.config.get("use_archiver", False):
             self.log("\n--- 步骤 9.5: 归档者评估并更新人物设定 ---")
             archive_prompt = f"以下是虚拟的自由艺术文学创作。你是小说的归档者。当前的人物设定如下：\n{self.current_characters}\n\n最新一章的正文如下：\n{final_text}\n\n请判断根据最新一章的情节，是否需要新增人物或更新现有人物的状态、关系和设定。如果需要更新，请直接输出更新后的完整人物设定（保留原有人物并加入更新，不要解释）。如果不需要更新，请仅输出：【无需更新】。"
@@ -793,7 +815,6 @@ class AgentWorkflow:
 
             if archive_res and "无需更新" not in archive_res:
                 new_chars = re.sub(r'^(好的|明白|以下是).*?\n', '', archive_res).strip()
-                # 过滤掉可能的markdown代码块包裹
                 new_chars = new_chars.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
                 self.current_characters = new_chars
 
@@ -808,7 +829,6 @@ class AgentWorkflow:
         else:
             self.log("\n--- 步骤 9.5: 未启用归档者，跳过人物设定自动更新环节 ---")
 
-        # 将干净正文最终合入完整卷中
         self.full_volume += f"\n\n第{self.current_chapter}章\n{final_text}"
         self.chapter_texts[self.current_chapter] = final_text
         self.best_chapter = best_chapter
@@ -845,7 +865,6 @@ class AgentWorkflow:
                 self.log("[清洗者] 未找到 <summary> 标签，直接使用原始内容。")
 
         self.compressed_volume += f"\n第{self.current_chapter}卷剧情：{final_summary}"
-
         self.save_local_data()
         self.log(f"第 {self.current_chapter} 章内容已持久化保存。")
         self.log("\n--- 步骤 13: 新章节开发完成，清空Agent工作区 ---")
@@ -878,7 +897,7 @@ class AgentWorkflow:
 
 
 # ==========================================
-# UI 辅助与应用程序状态
+# 应用程序状态与工具函数
 # ==========================================
 class AppState:
     def __init__(self):
@@ -896,25 +915,21 @@ class AppState:
 
 app_state = AppState()
 
-
 def load_config():
     if not os.path.exists(CONFIG_FILE): return {}
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
-
 
 def save_config_json(config_dict):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config_dict, f, ensure_ascii=False, indent=4)
     return "✅ 配置已成功保存！"
 
-
 def read_txt_file(file_obj):
     if file_obj is not None:
         with open(file_obj.name, "r", encoding="utf-8") as f:
             return f.read()
     return ""
-
 
 def fetch_models(api_type, url_str, keys_str):
     if not keys_str:
@@ -951,20 +966,15 @@ def fetch_models(api_type, url_str, keys_str):
     except Exception as e:
         return gr.update(), f"❌ 无法获取模型列表:\n{str(e)}"
 
-
 def on_user_login(username):
     if not username:
-        return [gr.update(choices=[], value=None)] * 7  # ✅ 已对齐长度 7
+        return [gr.update(choices=[], value=None)] * len(AGENT_NAMES_MAP)
 
     mode_dir = os.path.join("NovelGen", username, "modes")
     mode.init_modes(mode_dir)
 
     modes = get_all_modes(username)
-    default_vals = [
-        "Designer_R18.json", "Developer_R18.json", "Reviewer_R18.json",
-        "Judger_R18.json", "Compressor_R18.json", "Cleaner_R18.json",
-        "Archiver_R18.json"  # ✅ 新增默认设定
-    ]
+    default_vals = [m[2] for m in AGENT_NAMES_MAP]
 
     updates = []
     for d_val in default_vals:
@@ -972,25 +982,23 @@ def on_user_login(username):
         updates.append(gr.update(choices=modes, value=val))
     return updates
 
-
 def build_config_dict(*args):
     keys = [
         "book_title", "outline", "style", "characters",
         "use_manual_outline", "manual_outline_data",
         "global_prompt", "custom_style_prompt",
         "designer_mode", "developer_mode", "reviewer_mode", "judge_mode", "compressor_mode", "cleaner_mode", "archiver_mode",
-        "need_dev_revise", "use_ai_cleaner", "use_archiver", # ✅ 新增：use_archiver
+        "need_dev_revise", "use_ai_cleaner", "use_archiver",
         "designer_count", "developer_count", "reviewer_count", "judge_count", "compressor_count", "cleaner_count", "archiver_count",
         "api_type", "api_keys", "api_url", "api_model",
         "fallback_api_type", "fallback_api_keys", "fallback_api_url", "fallback_api_model",
         "temperature", "top_p", "top_k"
     ]
-    agent_names = ["designer", "developer", "reviewer", "judge", "compressor", "cleaner", "archiver"]
+    agent_names = [m[1] for m in AGENT_NAMES_MAP]
     for en_name in agent_names:
         keys.extend([f"{en_name}_api_type", f"{en_name}_api_keys", f"{en_name}_api_url", f"{en_name}_api_model"])
 
     return dict(zip(keys, args))
-
 
 def start_generation(username, *args):
     if not username:
@@ -1019,10 +1027,8 @@ def start_generation(username, *args):
 
     yield app_state.log_text, gr.update(value="▶ 开始生成", interactive=True)
 
-
 def toggle_pause():
     if not app_state.workflow: return "▶ 开始生成", "尚未启动工作流。"
-
     if app_state.workflow.run_event.is_set():
         app_state.workflow.pause()
         app_state.log_callback("⏸ 已点击暂停。等待当前正在执行的API请求结束后挂起。")
@@ -1034,340 +1040,240 @@ def toggle_pause():
 
 
 # ==========================================
-# Gradio WebUI 界面渲染
+# Gradio WebUI 构建逻辑封装
 # ==========================================
-with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("## 📚 自闭环 AI 小说自动生成器 (并发加速 WebUI 版)")
+def build_ui():
+    with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("## 📚 自闭环 AI 小说自动生成器 (并发加速 WebUI 版)")
+        user_state = gr.State("")
 
-    user_state = gr.State("")
+        with gr.Group(visible=True) as login_group:
+            gr.Markdown("### 🔒 请先登录或注册")
+            with gr.Row():
+                input_user = gr.Textbox(label="用户名")
+                input_pwd = gr.Textbox(label="密码", type="password")
+            with gr.Row():
+                btn_login = gr.Button("🔑 登录", variant="primary")
+                btn_register = gr.Button("📝 注册新用户")
+            auth_msg = gr.Markdown("")
 
-    with gr.Group(visible=True) as login_group:
-        gr.Markdown("### 🔒 请先登录或注册")
-        with gr.Row():
-            input_user = gr.Textbox(label="用户名")
-            input_pwd = gr.Textbox(label="密码", type="password")
-        with gr.Row():
-            btn_login = gr.Button("🔑 登录", variant="primary")
-            btn_register = gr.Button("📝 注册新用户")
-        auth_msg = gr.Markdown("")
+        with gr.Group(visible=False) as main_group:
+            with gr.Row():
+                welcome_text = gr.Markdown("")
+                btn_logout = gr.Button("🚪 退出登录", size="sm")
 
-    with gr.Group(visible=False) as main_group:
-        with gr.Row():
-            welcome_text = gr.Markdown("")
-            btn_logout = gr.Button("🚪 退出登录", size="sm")
+            init_conf = load_config()
 
-        init_conf = load_config()
-
-        with gr.Tabs():
-            # Tab 1: 用户输入
-            with gr.TabItem("✍️ 用户输入 (剧情/设定)"):
-                book_title = gr.Textbox(label="书名 (必选)", value=init_conf.get("book_title", ""))
-                with gr.Row():
-                    outline = gr.Textbox(label="剧情总大纲 (必选)", lines=5, value=init_conf.get("outline", ""))
-                    btn_outline = gr.UploadButton("上传总大纲 (.txt)", file_types=[".txt"])
-                    btn_outline.upload(read_txt_file, inputs=[btn_outline], outputs=[outline])
-                with gr.Row():
-                    style = gr.Textbox(label="剧情风格 (可选)", lines=3, value=init_conf.get("style", ""))
-                    btn_style = gr.UploadButton("上传风格 (.txt)", file_types=[".txt"])
-                    btn_style.upload(read_txt_file, inputs=[btn_style], outputs=[style])
-                with gr.Row():
-                    characters = gr.Textbox(label="人物列表 (可选)", lines=3, value=init_conf.get("characters", ""))
-                    btn_char = gr.UploadButton("上传人物 (.txt)", file_types=[".txt"])
-                    btn_char.upload(read_txt_file, inputs=[btn_char], outputs=[characters])
-
-                with gr.Accordion("📝 人工制定各章大纲模式 (可选)", open=False):
-                    use_manual_outline = gr.Checkbox(label="启用人工输入大纲",
-                                                     value=init_conf.get("use_manual_outline", False))
-
+            with gr.Tabs():
+                # Tab 1: 用户输入
+                with gr.TabItem("✍️ 用户输入 (剧情/设定)"):
+                    book_title = gr.Textbox(label="书名 (必选)", value=init_conf.get("book_title", ""))
                     with gr.Row():
-                        outline_dropdown = gr.Dropdown(label="加载本地大纲", choices=[], interactive=True)
-                        btn_load_outline = gr.Button("📂 加载", size="sm")
-                        btn_refresh_outlines = gr.Button("🔄 刷新", size="sm")
+                        outline = gr.Textbox(label="剧情总大纲 (必选)", lines=5, value=init_conf.get("outline", ""))
+                        btn_outline = gr.UploadButton("上传总大纲 (.txt)", file_types=[".txt"])
+                        btn_outline.upload(read_txt_file, inputs=[btn_outline], outputs=[outline])
                     with gr.Row():
-                        outline_save_name = gr.Textbox(label="输入大纲名称 (用于保存)", placeholder="例如：第一卷细纲")
-                        btn_save_outline = gr.Button("💾 保存到本地", variant="primary", size="sm")
-                    outline_op_msg = gr.Markdown("")
+                        style = gr.Textbox(label="剧情风格 (可选)", lines=3, value=init_conf.get("style", ""))
+                        btn_style = gr.UploadButton("上传风格 (.txt)", file_types=[".txt"])
+                        btn_style.upload(read_txt_file, inputs=[btn_style], outputs=[style])
+                    with gr.Row():
+                        characters = gr.Textbox(label="人物列表 (可选)", lines=3, value=init_conf.get("characters", ""))
+                        btn_char = gr.UploadButton("上传人物 (.txt)", file_types=[".txt"])
+                        btn_char.upload(read_txt_file, inputs=[btn_char], outputs=[characters])
 
-                    manual_outline_data = gr.Dataframe(
-                        headers=["章节号", "章节名", "章节概要"],
-                        datatype=["number", "str", "str"],
-                        col_count=(3, "fixed"), row_count=(1, "dynamic"),
-                        value=init_conf.get("manual_outline_data", [[1, "", ""]]),
-                        interactive=True, type="array", label="请在下方输入各章详细大纲"
-                    )
-                    btn_add_manual_row = gr.Button("➕ 新增一章大纲", size="sm")
-
-            with gr.TabItem("🎭 人物设定库"):
-                gr.Markdown("在这里可以将填写好的「人物列表」保存为独立的设定文件，方便日后一键加载。")
-
-                with gr.Row():
-                    role_dropdown = gr.Dropdown(label="选择已有的人物设定文件", choices=[], interactive=True)
-                    btn_load_role = gr.Button("📂 加载选中的设定", size="sm")
-                    btn_refresh_roles = gr.Button("🔄 刷新设定列表", size="sm")
-
-                with gr.Row():
-                    role_save_name = gr.Textbox(label="人物设定名 (如: genshin，将自动保存为 .json)",
-                                                placeholder="输入设定名")
-                    btn_save_role = gr.Button("💾 将当前输入框保存为新设定", variant="primary", size="sm")
-
-                role_op_msg = gr.Markdown("")
-
-            # Tab 2: 开发组设置
-            with gr.TabItem("⚙️ 开发组设置 (数量/提示词/配置文件)"):
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        global_prompt = gr.Textbox(label="全局系统提示词 (所有Agent生效)", lines=3,
-                                                   value=init_conf.get("global_prompt", ""))
-                        custom_style_prompt = gr.Textbox(label="自定义写作风格 (仅向开发者追加)", lines=3,
-                                                         value=init_conf.get("custom_style_prompt", ""))
-
-                        need_dev_revise = gr.Checkbox(label="需要开发者修改 (触发检视/裁判环节)",
-                                                      value=init_conf.get("need_dev_revise", False))
-                        use_ai_cleaner = gr.Checkbox(label="启用 AI 清洗者 (不勾选则使用正则快速提取)",
-                                                     value=init_conf.get("use_ai_cleaner", False))
-                        use_archiver = gr.Checkbox(label="启用人物归档者 (自动根据最新剧情更新人物)",
-                                                   value=init_conf.get("use_archiver", False))  # ✅ 新增：UI 开关
-
-                    with gr.Column(scale=3):
-                        gr.Markdown("### 📂 Agent 配置文件分配")
-                        mode_choices = []
-                        agent_mode_dropdowns = {}
-
-                        # ✅ 加上归档者UI配置
-                        agent_names_map = [
-                            ("设计者", "designer", "Designer_R18.json"), ("开发者", "developer", "Developer_R18.json"),
-                            ("评审者", "reviewer", "Reviewer_R18.json"), ("裁判者", "judge", "Judger_R18.json"),
-                            ("压缩者", "compressor", "Compressor_R18.json"), ("清洗者", "cleaner", "Cleaner_R18.json"),
-                            ("归档者", "archiver", "Archiver_R18.json")
-                        ]
+                    with gr.Accordion("📝 人工制定各章大纲模式 (可选)", open=False):
+                        use_manual_outline = gr.Checkbox(label="启用人工输入大纲", value=init_conf.get("use_manual_outline", False))
 
                         with gr.Row():
-                            with gr.Column():
-                                for zh, en, d_val in agent_names_map[:3]:
-                                    agent_mode_dropdowns[en] = gr.Dropdown(label=f"{zh}配置", choices=mode_choices,
-                                                                           value=init_conf.get(f"{en}_mode",
-                                                                                               d_val if d_val in mode_choices else (
-                                                                                                   mode_choices[
-                                                                                                       0] if mode_choices else None)))
-                            with gr.Column():
-                                for zh, en, d_val in agent_names_map[3:5]:
-                                    agent_mode_dropdowns[en] = gr.Dropdown(label=f"{zh}配置", choices=mode_choices,
-                                                                           value=init_conf.get(f"{en}_mode",
-                                                                                               d_val if d_val in mode_choices else (
-                                                                                                   mode_choices[
-                                                                                                       0] if mode_choices else None)))
-                            with gr.Column():
-                                for zh, en, d_val in agent_names_map[5:]:
-                                    agent_mode_dropdowns[en] = gr.Dropdown(label=f"{zh}配置", choices=mode_choices,
-                                                                           value=init_conf.get(f"{en}_mode",
-                                                                                               d_val if d_val in mode_choices else (
-                                                                                                   mode_choices[
-                                                                                                       0] if mode_choices else None)))
+                            outline_dropdown = gr.Dropdown(label="加载本地大纲", choices=[], interactive=True)
+                            btn_load_outline = gr.Button("📂 加载", size="sm")
+                            btn_refresh_outlines = gr.Button("🔄 刷新", size="sm")
+                        with gr.Row():
+                            outline_save_name = gr.Textbox(label="输入大纲名称 (用于保存)", placeholder="例如：第一卷细纲")
+                            btn_save_outline = gr.Button("💾 保存到本地", variant="primary", size="sm")
+                        outline_op_msg = gr.Markdown("")
 
-                        with gr.Accordion("➕ 新建全局模式预设", open=False):
-                            new_mode_name = gr.Textbox(label="预设名 (自动加 .json，如: Designer_Dark)")
-                            new_mode_sys = gr.Textbox(label="Agent人设", lines=2)
-                            new_mode_intro = gr.Textbox(label="Agent自我介绍", lines=2)
-                            new_mode_history = gr.Dataframe(
-                                headers=["用户输入 (用户：xxx)", "模型回复 (agent：xxx)"],
-                                datatype=["str", "str"],
-                                col_count=(2, "fixed"), row_count=(1, "dynamic"),
-                                value=[["", ""]], interactive=True, type="array",
-                                label="预填充聊天记录 (Few-Shot)"
-                            )
-                            btn_add_history_row = gr.Button("➕ 新增一条聊天记录", size="sm")
-                            btn_save_mode = gr.Button("💾 保存为预设", variant="primary")
-                            mode_save_msg = gr.Markdown("")
+                        manual_outline_data = gr.Dataframe(
+                            headers=["章节号", "章节名", "章节概要"], datatype=["number", "str", "str"],
+                            col_count=(3, "fixed"), row_count=(1, "dynamic"),
+                            value=init_conf.get("manual_outline_data", [[1, "", ""]]),
+                            interactive=True, type="array", label="请在下方输入各章详细大纲"
+                        )
+                        btn_add_manual_row = gr.Button("➕ 新增一章大纲", size="sm")
 
-                gr.Markdown("### Agent 数量配置")
-                with gr.Row():
-                    designer_count = gr.Number(label="设计者数量", value=int(init_conf.get("designer_count", 1)),
-                                               precision=0)
-                    developer_count = gr.Number(label="开发者数量", value=int(init_conf.get("developer_count", 1)),
-                                                precision=0)
-                    reviewer_count = gr.Number(label="评审者数量", value=int(init_conf.get("reviewer_count", 1)),
-                                               precision=0)
-                    judge_count = gr.Number(label="裁判者数量", value=int(init_conf.get("judge_count", 1)), precision=0)
-                with gr.Row():
-                    compressor_count = gr.Number(label="压缩者数量", value=int(init_conf.get("compressor_count", 1)),
-                                                 precision=0)
-                    cleaner_count = gr.Number(label="清洗者数量", value=int(init_conf.get("cleaner_count", 1)),
-                                              precision=0)
-                    archiver_count = gr.Number(label="归档者数量", value=int(init_conf.get("archiver_count", 1)),
-                                               precision=0)  # ✅ 增加归档者数量配置
-
-            # Tab 3: API 配置
-            with gr.TabItem("🔑 API 配置"):
-                with gr.Accordion("⚙️ 模型生成参数 (默认均衡值)", open=False):
+                with gr.TabItem("🎭 人物设定库"):
+                    gr.Markdown("在这里可以将填写好的「人物列表」保存为独立的设定文件，方便日后一键加载。")
                     with gr.Row():
-                        temperature = gr.Slider(0.0, 2.0, value=float(init_conf.get("temperature", 0.7)), step=0.1,
-                                                label="Temperature (温度)")
-                        top_p = gr.Slider(0.0, 1.0, value=float(init_conf.get("top_p", 0.9)), step=0.05, label="Top P")
-                        top_k = gr.Slider(1, 100, value=int(init_conf.get("top_k", 40)), step=1, label="Top K")
+                        role_dropdown = gr.Dropdown(label="选择已有的人物设定文件", choices=[], interactive=True)
+                        btn_load_role = gr.Button("📂 加载选中的设定", size="sm")
+                        btn_refresh_roles = gr.Button("🔄 刷新设定列表", size="sm")
+                    with gr.Row():
+                        role_save_name = gr.Textbox(label="人物设定名 (如: genshin，将自动保存为 .json)", placeholder="输入设定名")
+                        btn_save_role = gr.Button("💾 将当前输入框保存为新设定", variant="primary", size="sm")
+                    role_op_msg = gr.Markdown("")
 
-                api_status = gr.Textbox(label="API 获取状态", interactive=False)
-                gr.Markdown("### 【主 API 配置】")
-                with gr.Row():
-                    api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="API 类型",
-                                           value=init_conf.get("api_type", "Gemini"))
-                    api_keys = gr.Textbox(label="API Keys (多个用逗号隔开)", type="password",
-                                          value=init_conf.get("api_keys", ""))
-                with gr.Row():
-                    api_url = gr.Textbox(label="API URL", value=init_conf.get("api_url",
-                                                                              "[https://generativelanguage.googleapis.com](https://generativelanguage.googleapis.com)"))
-                    api_model = gr.Dropdown(label="API 模型", choices=[init_conf.get("api_model", "gemini-2.5-flash")],
-                                            value=init_conf.get("api_model", "gemini-2.5-flash"),
-                                            allow_custom_value=True)
-                    btn_fetch_main = gr.Button("🔄 获取主模型")
-                    btn_fetch_main.click(fetch_models, inputs=[api_type, api_url, api_keys],
-                                         outputs=[api_model, api_status])
+                # Tab 2: 开发组设置
+                with gr.TabItem("⚙️ 开发组设置 (数量/提示词/配置文件)"):
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            global_prompt = gr.Textbox(label="全局系统提示词 (所有Agent生效)", lines=3, value=init_conf.get("global_prompt", ""))
+                            custom_style_prompt = gr.Textbox(label="自定义写作风格 (仅向开发者追加)", lines=3, value=init_conf.get("custom_style_prompt", ""))
+                            need_dev_revise = gr.Checkbox(label="需要开发者修改 (触发检视/裁判环节)", value=init_conf.get("need_dev_revise", False))
+                            use_ai_cleaner = gr.Checkbox(label="启用 AI 清洗者 (不勾选则使用正则快速提取)", value=init_conf.get("use_ai_cleaner", False))
+                            use_archiver = gr.Checkbox(label="启用人物归档者 (自动根据最新剧情更新人物)", value=init_conf.get("use_archiver", False))
 
-                gr.Markdown("---")
-                gr.Markdown("### 【备用 API 配置 (可选) - 当主API连续失败后临时接管】")
-                with gr.Row():
-                    fallback_api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="备用 API 类型",
-                                                    value=init_conf.get("fallback_api_type", "OpenAI Compatible"))
-                    fallback_api_keys = gr.Textbox(label="备用 API Keys", type="password",
-                                                   value=init_conf.get("fallback_api_keys", ""))
-                with gr.Row():
-                    fallback_api_url = gr.Textbox(label="备用 API URL", value=init_conf.get("fallback_api_url", ""))
-                    fallback_api_model = gr.Dropdown(label="备用 API 模型",
-                                                     choices=[init_conf.get("fallback_api_model", "")],
-                                                     value=init_conf.get("fallback_api_model", ""),
-                                                     allow_custom_value=True)
-                    btn_fetch_fallback = gr.Button("🔄 获取备用模型")
-                    btn_fetch_fallback.click(fetch_models,
-                                             inputs=[fallback_api_type, fallback_api_url, fallback_api_keys],
-                                             outputs=[fallback_api_model, api_status])
+                        with gr.Column(scale=3):
+                            gr.Markdown("### 📂 Agent 配置文件分配")
+                            mode_choices = []
+                            agent_mode_dropdowns = {}
 
-                gr.Markdown("---")
-                agent_api_inputs = []
-                with gr.Accordion("🤖 独立 Agent API 配置 (按需填写，留空则使用主API)", open=False):
-                    with gr.Tabs():
-                        for zh_name, en_name, _ in agent_names_map:
-                            with gr.TabItem(f"{zh_name}"):
-                                with gr.Row():
-                                    a_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label=f"{zh_name} API 类型",
-                                                         value=init_conf.get(f"{en_name}_api_type", "Gemini"))
-                                    a_keys = gr.Textbox(label=f"{zh_name} API Keys", type="password",
-                                                        value=init_conf.get(f"{en_name}_api_keys", ""))
-                                with gr.Row():
-                                    a_url = gr.Textbox(label=f"{zh_name} API URL",
-                                                       value=init_conf.get(f"{en_name}_api_url", ""))
-                                    a_model = gr.Dropdown(label=f"{zh_name} API 模型", choices=[
-                                        init_conf.get(f"{en_name}_api_model", "gemini-2.5-flash")],
-                                                          value=init_conf.get(f"{en_name}_api_model",
-                                                                              "gemini-2.5-flash"),
-                                                          allow_custom_value=True)
-                                agent_api_inputs.extend([a_type, a_keys, a_url, a_model])
+                            with gr.Row():
+                                with gr.Column():
+                                    for zh, en, d_val in AGENT_NAMES_MAP[:3]:
+                                        agent_mode_dropdowns[en] = gr.Dropdown(label=f"{zh}配置", choices=mode_choices, value=init_conf.get(f"{en}_mode", d_val if d_val in mode_choices else (mode_choices[0] if mode_choices else None)))
+                                with gr.Column():
+                                    for zh, en, d_val in AGENT_NAMES_MAP[3:5]:
+                                        agent_mode_dropdowns[en] = gr.Dropdown(label=f"{zh}配置", choices=mode_choices, value=init_conf.get(f"{en}_mode", d_val if d_val in mode_choices else (mode_choices[0] if mode_choices else None)))
+                                with gr.Column():
+                                    for zh, en, d_val in AGENT_NAMES_MAP[5:]:
+                                        agent_mode_dropdowns[en] = gr.Dropdown(label=f"{zh}配置", choices=mode_choices, value=init_conf.get(f"{en}_mode", d_val if d_val in mode_choices else (mode_choices[0] if mode_choices else None)))
 
-            # Tab 4: 控制台 & 日志
-            with gr.TabItem("💻 控制台 & 日志"):
-                with gr.Row():
-                    btn_start = gr.Button("▶ 开始生成", variant="primary")
-                    btn_pause = gr.Button("⏸ 暂停", interactive=False)
-                    btn_save = gr.Button("💾 保存配置")
-                sys_msg = gr.Textbox(label="系统提示", interactive=False)
-                log_output = gr.Textbox(label="运行日志 (自动滚动)", lines=25, max_lines=25, interactive=False)
+                            with gr.Accordion("➕ 新建全局模式预设", open=False):
+                                new_mode_name = gr.Textbox(label="预设名 (自动加 .json，如: Designer_Dark)")
+                                new_mode_sys = gr.Textbox(label="Agent人设", lines=2)
+                                new_mode_intro = gr.Textbox(label="Agent自我介绍", lines=2)
+                                new_mode_history = gr.Dataframe(
+                                    headers=["用户输入 (用户：xxx)", "模型回复 (agent：xxx)"], datatype=["str", "str"],
+                                    col_count=(2, "fixed"), row_count=(1, "dynamic"), value=[["", ""]], interactive=True, type="array", label="预填充聊天记录 (Few-Shot)"
+                                )
+                                btn_add_history_row = gr.Button("➕ 新增一条聊天记录", size="sm")
+                                btn_save_mode = gr.Button("💾 保存为预设", variant="primary")
+                                mode_save_msg = gr.Markdown("")
 
-            # Tab 5: 文件管理
-            with gr.TabItem("📁 个人文件管理"):
-                btn_refresh = gr.Button("🔄 刷新小说列表")
-                book_select = gr.Dropdown(label="选择要管理的小说", choices=[])
-                with gr.Row():
-                    btn_download_book = gr.Button("📦 打包并下载该小说", variant="primary")
-                    btn_delete_book = gr.Button("🗑️ 彻底删除该小说", variant="stop")
-                fm_msg = gr.Textbox(label="文件操作状态", interactive=False)
-                fm_download_file = gr.File(label="获取成功！点击下载压缩包", interactive=False, visible=False)
+                    gr.Markdown("### Agent 数量配置")
+                    with gr.Row():
+                        designer_count = gr.Number(label="设计者数量", value=int(init_conf.get("designer_count", 1)), precision=0)
+                        developer_count = gr.Number(label="开发者数量", value=int(init_conf.get("developer_count", 1)), precision=0)
+                        reviewer_count = gr.Number(label="评审者数量", value=int(init_conf.get("reviewer_count", 1)), precision=0)
+                        judge_count = gr.Number(label="裁判者数量", value=int(init_conf.get("judge_count", 1)), precision=0)
+                    with gr.Row():
+                        compressor_count = gr.Number(label="压缩者数量", value=int(init_conf.get("compressor_count", 1)), precision=0)
+                        cleaner_count = gr.Number(label="清洗者数量", value=int(init_conf.get("cleaner_count", 1)), precision=0)
+                        archiver_count = gr.Number(label="归档者数量", value=int(init_conf.get("archiver_count", 1)), precision=0)
 
-    # ✅ 精确对齐参数数组映射，增加 archiver
-    all_inputs = [
-                     book_title, outline, style, characters,
-                     use_manual_outline, manual_outline_data,
-                     global_prompt, custom_style_prompt,
-                     agent_mode_dropdowns["designer"], agent_mode_dropdowns["developer"],
-                     agent_mode_dropdowns["reviewer"], agent_mode_dropdowns["judge"],
-                     agent_mode_dropdowns["compressor"], agent_mode_dropdowns["cleaner"],
-                     agent_mode_dropdowns["archiver"],
-                     need_dev_revise, use_ai_cleaner, use_archiver,  # ✅ 新增：将 UI 组件传入
-                     designer_count, developer_count, reviewer_count, judge_count, compressor_count, cleaner_count,
-                     archiver_count,
-                     api_type, api_keys, api_url, api_model,
-                     fallback_api_type, fallback_api_keys, fallback_api_url, fallback_api_model,
-                     temperature, top_p, top_k
-                 ] + agent_api_inputs
+                # Tab 3: API 配置
+                with gr.TabItem("🔑 API 配置"):
+                    with gr.Accordion("⚙️ 模型生成参数 (默认均衡值)", open=False):
+                        with gr.Row():
+                            temperature = gr.Slider(0.0, 2.0, value=float(init_conf.get("temperature", 0.7)), step=0.1, label="Temperature (温度)")
+                            top_p = gr.Slider(0.0, 1.0, value=float(init_conf.get("top_p", 0.9)), step=0.05, label="Top P")
+                            top_k = gr.Slider(1, 100, value=int(init_conf.get("top_k", 40)), step=1, label="Top K")
 
-    dropdowns_list = [agent_mode_dropdowns["designer"], agent_mode_dropdowns["developer"],
-                      agent_mode_dropdowns["reviewer"], agent_mode_dropdowns["judge"],
-                      agent_mode_dropdowns["compressor"], agent_mode_dropdowns["cleaner"],
-                      agent_mode_dropdowns["archiver"]]
+                    api_status = gr.Textbox(label="API 获取状态", interactive=False)
+                    gr.Markdown("### 【主 API 配置】")
+                    with gr.Row():
+                        api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="API 类型", value=init_conf.get("api_type", "Gemini"))
+                        api_keys = gr.Textbox(label="API Keys (多个用逗号隔开)", type="password", value=init_conf.get("api_keys", ""))
+                    with gr.Row():
+                        api_url = gr.Textbox(label="API URL", value=init_conf.get("api_url", "[https://generativelanguage.googleapis.com](https://generativelanguage.googleapis.com)"))
+                        api_model = gr.Dropdown(label="API 模型", choices=[init_conf.get("api_model", "gemini-2.5-flash")], value=init_conf.get("api_model", "gemini-2.5-flash"), allow_custom_value=True)
+                        btn_fetch_main = gr.Button("🔄 获取主模型")
+                        btn_fetch_main.click(fetch_models, inputs=[api_type, api_url, api_keys], outputs=[api_model, api_status])
 
-    # --- 事件绑定 ---
-    btn_add_manual_row.click(fn=lambda df: df + [[len(df) + 1, "", ""]] if df else [[1, "", ""]],
-                             inputs=[manual_outline_data], outputs=[manual_outline_data])
-    btn_add_history_row.click(fn=lambda df: df + [["", ""]] if df else [["", ""]], inputs=[new_mode_history],
-                              outputs=[new_mode_history])
+                    gr.Markdown("---")
+                    gr.Markdown("### 【备用 API 配置 (可选) - 当主API连续失败后临时接管】")
+                    with gr.Row():
+                        fallback_api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="备用 API 类型", value=init_conf.get("fallback_api_type", "OpenAI Compatible"))
+                        fallback_api_keys = gr.Textbox(label="备用 API Keys", type="password", value=init_conf.get("fallback_api_keys", ""))
+                    with gr.Row():
+                        fallback_api_url = gr.Textbox(label="备用 API URL", value=init_conf.get("fallback_api_url", ""))
+                        fallback_api_model = gr.Dropdown(label="备用 API 模型", choices=[init_conf.get("fallback_api_model", "")], value=init_conf.get("fallback_api_model", ""), allow_custom_value=True)
+                        btn_fetch_fallback = gr.Button("🔄 获取备用模型")
+                        btn_fetch_fallback.click(fetch_models, inputs=[fallback_api_type, fallback_api_url, fallback_api_keys], outputs=[fallback_api_model, api_status])
 
-    btn_save_mode.click(
-        fn=ModeManager.save_mode,
-        inputs=[user_state, new_mode_name, new_mode_sys, new_mode_intro, new_mode_history],
-        outputs=[mode_save_msg] + dropdowns_list
-    )
+                    gr.Markdown("---")
+                    agent_api_inputs = []
+                    with gr.Accordion("🤖 独立 Agent API 配置 (按需填写，留空则使用主API)", open=False):
+                        with gr.Tabs():
+                            for zh_name, en_name, _ in AGENT_NAMES_MAP:
+                                with gr.TabItem(f"{zh_name}"):
+                                    with gr.Row():
+                                        a_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label=f"{zh_name} API 类型", value=init_conf.get(f"{en_name}_api_type", "Gemini"))
+                                        a_keys = gr.Textbox(label=f"{zh_name} API Keys", type="password", value=init_conf.get(f"{en_name}_api_keys", ""))
+                                    with gr.Row():
+                                        a_url = gr.Textbox(label=f"{zh_name} API URL", value=init_conf.get(f"{en_name}_api_url", ""))
+                                        a_model = gr.Dropdown(label=f"{zh_name} API 模型", choices=[init_conf.get(f"{en_name}_api_model", "gemini-2.5-flash")], value=init_conf.get(f"{en_name}_api_model", "gemini-2.5-flash"), allow_custom_value=True)
+                                    agent_api_inputs.extend([a_type, a_keys, a_url, a_model])
 
-    btn_register.click(UserManager.register, inputs=[input_user, input_pwd], outputs=[auth_msg])
+                # Tab 4: 控制台 & 日志
+                with gr.TabItem("💻 控制台 & 日志"):
+                    with gr.Row():
+                        btn_start = gr.Button("▶ 开始生成", variant="primary")
+                        btn_pause = gr.Button("⏸ 暂停", interactive=False)
+                        btn_save = gr.Button("💾 保存配置")
+                    sys_msg = gr.Textbox(label="系统提示", interactive=False)
+                    log_output = gr.Textbox(label="运行日志 (自动滚动)", lines=25, max_lines=25, interactive=False)
 
-    btn_login.click(UserManager.login, inputs=[input_user, input_pwd],
-                    outputs=[auth_msg, user_state, login_group, main_group, welcome_text])
-    btn_login.click(FileManager.get_user_books, inputs=[input_user], outputs=[book_select])
-    btn_login.click(on_user_login, inputs=[input_user], outputs=dropdowns_list)
-    btn_login.click(FileManager.get_manual_outlines, inputs=[input_user], outputs=[outline_dropdown])
-    btn_login.click(FileManager.get_user_roles, inputs=[input_user], outputs=[role_dropdown])
+                # Tab 5: 文件管理
+                with gr.TabItem("📁 个人文件管理"):
+                    btn_refresh = gr.Button("🔄 刷新小说列表")
+                    book_select = gr.Dropdown(label="选择要管理的小说", choices=[])
+                    with gr.Row():
+                        btn_download_book = gr.Button("📦 打包并下载该小说", variant="primary")
+                        btn_delete_book = gr.Button("🗑️ 彻底删除该小说", variant="stop")
+                    fm_msg = gr.Textbox(label="文件操作状态", interactive=False)
+                    fm_download_file = gr.File(label="获取成功！点击下载压缩包", interactive=False, visible=False)
 
-    btn_logout.click(UserManager.logout, inputs=[],
-                     outputs=[user_state, auth_msg, login_group, main_group, welcome_text])
+        # 构造输入参数列表
+        all_inputs = [
+            book_title, outline, style, characters,
+            use_manual_outline, manual_outline_data,
+            global_prompt, custom_style_prompt,
+            agent_mode_dropdowns["designer"], agent_mode_dropdowns["developer"],
+            agent_mode_dropdowns["reviewer"], agent_mode_dropdowns["judge"],
+            agent_mode_dropdowns["compressor"], agent_mode_dropdowns["cleaner"],
+            agent_mode_dropdowns["archiver"],
+            need_dev_revise, use_ai_cleaner, use_archiver,
+            designer_count, developer_count, reviewer_count, judge_count, compressor_count, cleaner_count, archiver_count,
+            api_type, api_keys, api_url, api_model,
+            fallback_api_type, fallback_api_keys, fallback_api_url, fallback_api_model,
+            temperature, top_p, top_k
+        ] + agent_api_inputs
 
-    # === 大纲操作事件绑定 ===
-    btn_save_outline.click(
-        fn=FileManager.save_manual_outline,
-        inputs=[user_state, outline_save_name, manual_outline_data],
-        outputs=[outline_op_msg, outline_dropdown]
-    )
-    btn_load_outline.click(
-        fn=FileManager.load_manual_outline,
-        inputs=[user_state, outline_dropdown],
-        outputs=[manual_outline_data, outline_op_msg]
-    )
-    btn_refresh_outlines.click(
-        fn=FileManager.get_manual_outlines,
-        inputs=[user_state],
-        outputs=[outline_dropdown]
-    )
+        dropdowns_list = [agent_mode_dropdowns[en] for _, en, _ in AGENT_NAMES_MAP]
 
-    # === 人物设定操作事件绑定 ===
-    btn_save_role.click(
-        fn=FileManager.save_role_config,
-        inputs=[user_state, role_save_name, characters],
-        outputs=[role_op_msg, role_dropdown]
-    )
-    btn_load_role.click(
-        fn=FileManager.load_role_config,
-        inputs=[user_state, role_dropdown],
-        outputs=[characters, role_op_msg]
-    )
-    btn_refresh_roles.click(
-        fn=FileManager.get_user_roles,
-        inputs=[user_state],
-        outputs=[role_dropdown]
-    )
+        # === 核心事件绑定 ===
+        btn_add_manual_row.click(fn=lambda df: df + [[len(df) + 1, "", ""]] if df else [[1, "", ""]], inputs=[manual_outline_data], outputs=[manual_outline_data])
+        btn_add_history_row.click(fn=lambda df: df + [["", ""]] if df else [["", ""]], inputs=[new_mode_history], outputs=[new_mode_history])
+        btn_save_mode.click(fn=ModeManager.save_mode, inputs=[user_state, new_mode_name, new_mode_sys, new_mode_intro, new_mode_history], outputs=[mode_save_msg] + dropdowns_list)
 
-    btn_save.click(fn=lambda *args: save_config_json(build_config_dict(*args)), inputs=all_inputs, outputs=[sys_msg])
-    btn_start.click(fn=start_generation, inputs=[user_state] + all_inputs, outputs=[log_output, btn_pause])
-    btn_pause.click(fn=toggle_pause, inputs=[], outputs=[btn_pause, sys_msg])
+        btn_register.click(UserManager.register, inputs=[input_user, input_pwd], outputs=[auth_msg])
+        btn_login.click(UserManager.login, inputs=[input_user, input_pwd], outputs=[auth_msg, user_state, login_group, main_group, welcome_text])
+        btn_login.click(FileManager.get_user_books, inputs=[input_user], outputs=[book_select])
+        btn_login.click(on_user_login, inputs=[input_user], outputs=dropdowns_list)
+        btn_login.click(FileManager.get_manual_outlines, inputs=[input_user], outputs=[outline_dropdown])
+        btn_login.click(FileManager.get_user_roles, inputs=[input_user], outputs=[role_dropdown])
+        btn_logout.click(UserManager.logout, inputs=[], outputs=[user_state, auth_msg, login_group, main_group, welcome_text])
 
-    btn_refresh.click(FileManager.get_user_books, inputs=[user_state], outputs=[book_select])
-    btn_download_book.click(FileManager.export_book_folder, inputs=[user_state, book_select],
-                            outputs=[fm_download_file, fm_msg])
-    btn_delete_book.click(FileManager.delete_user_book, inputs=[user_state, book_select], outputs=[fm_msg, book_select])
+        btn_save_outline.click(fn=FileManager.save_manual_outline, inputs=[user_state, outline_save_name, manual_outline_data], outputs=[outline_op_msg, outline_dropdown])
+        btn_load_outline.click(fn=FileManager.load_manual_outline, inputs=[user_state, outline_dropdown], outputs=[manual_outline_data, outline_op_msg])
+        btn_refresh_outlines.click(fn=FileManager.get_manual_outlines, inputs=[user_state], outputs=[outline_dropdown])
+
+        btn_save_role.click(fn=FileManager.save_role_config, inputs=[user_state, role_save_name, characters], outputs=[role_op_msg, role_dropdown])
+        btn_load_role.click(fn=FileManager.load_role_config, inputs=[user_state, role_dropdown], outputs=[characters, role_op_msg])
+        btn_refresh_roles.click(fn=FileManager.get_user_roles, inputs=[user_state], outputs=[role_dropdown])
+
+        btn_save.click(fn=lambda *args: save_config_json(build_config_dict(*args)), inputs=all_inputs, outputs=[sys_msg])
+        btn_start.click(fn=start_generation, inputs=[user_state] + all_inputs, outputs=[log_output, btn_pause])
+        btn_pause.click(fn=toggle_pause, inputs=[], outputs=[btn_pause, sys_msg])
+
+        btn_refresh.click(FileManager.get_user_books, inputs=[user_state], outputs=[book_select])
+        btn_download_book.click(FileManager.export_book_folder, inputs=[user_state, book_select], outputs=[fm_download_file, fm_msg])
+        btn_delete_book.click(FileManager.delete_user_book, inputs=[user_state, book_select], outputs=[fm_msg, book_select])
+
+    return demo
+
 
 if __name__ == "__main__":
+    demo = build_ui()
     demo.launch(server_name="0.0.0.0", server_port=7860, inbrowser=True)
