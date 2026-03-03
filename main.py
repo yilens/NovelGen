@@ -131,9 +131,9 @@ class FileManager:
         user_dir = os.path.join("NovelGen", username, "Books")
         if not os.path.exists(user_dir):
             return gr.update(choices=[], value=None)
-        # 排除了系统文件夹 (mode, outline等)
+        # 排除了系统文件夹 (mode, outline, roles等)
         books = [d for d in os.listdir(user_dir) if
-                 os.path.isdir(os.path.join(user_dir, d)) and d not in ["mode", "modes", "outline"]]
+                 os.path.isdir(os.path.join(user_dir, d)) and d not in ["mode", "modes", "outline", "roles"]]
         return gr.update(choices=books, value=books[0] if books else None)
 
     @staticmethod
@@ -174,7 +174,7 @@ class FileManager:
                 return f.read()
         return ""
 
-    # === 新增：人工大纲文件的保存与读取方法 ===
+    # === 人工大纲文件的保存与读取方法 ===
     @staticmethod
     def get_manual_outlines(username):
         if not username: return gr.update(choices=[], value=None)
@@ -218,6 +218,59 @@ class FileManager:
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return gr.update(value=data), f"✅ 成功加载大纲: {outline_file}"
+        except Exception as e:
+            return gr.update(), f"❌ 读取失败: {e}"
+
+    # === 新增：人物配置文件的保存与读取方法 ===
+    @staticmethod
+    def get_user_roles(username):
+        """获取用户的所有人物配置文件"""
+        if not username: return gr.update(choices=[], value=None)
+        role_dir = os.path.join("NovelGen", username, "roles")
+        if not os.path.exists(role_dir):
+            return gr.update(choices=[], value=None)
+        roles = sorted([f for f in os.listdir(role_dir) if f.endswith('.json')])
+        return gr.update(choices=roles, value=roles[0] if roles else None)
+
+    @staticmethod
+    def save_role_config(username, role_name, chars_text):
+        """保存人物配置到文件"""
+        if not username: return "❌ 请先登录", gr.update()
+        if not role_name or not role_name.strip(): return "❌ 人物设定名不能为空", gr.update()
+        if not chars_text or not chars_text.strip(): return "❌ 人物信息不能为空", gr.update()
+
+        safe_name = re.sub(r'[\\/:*?"<>|]', '_', role_name.strip())
+        if not safe_name.endswith('.json'):
+            safe_name += '.json'
+
+        role_dir = os.path.join("NovelGen", username, "roles")
+        os.makedirs(role_dir, exist_ok=True)
+        filepath = os.path.join(role_dir, safe_name)
+
+        try:
+            # 使用JSON保存以便未来扩展，当前只保存一个 text 字段
+            role_data = {"characters": chars_text}
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(role_data, f, ensure_ascii=False, indent=4)
+            return f"✅ 人物设定 [{safe_name}] 保存成功！", FileManager.get_user_roles(username)
+        except Exception as e:
+            return f"❌ 保存失败: {str(e)}", gr.update()
+
+    @staticmethod
+    def load_role_config(username, role_file):
+        """加载指定的人物配置文件"""
+        if not username or not role_file:
+            return gr.update(), "❌ 尚未选择人物配置文件"
+
+        filepath = os.path.join("NovelGen", username, "roles", role_file)
+        if not os.path.exists(filepath):
+            return gr.update(), f"❌ 找不到文件: {role_file}"
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            chars_text = data.get("characters", "")
+            return gr.update(value=chars_text), f"✅ 成功加载人物设定: {role_file}"
         except Exception as e:
             return gr.update(), f"❌ 读取失败: {e}"
 
@@ -993,7 +1046,6 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
                     use_manual_outline = gr.Checkbox(label="启用人工输入大纲",
                                                      value=init_conf.get("use_manual_outline", False))
 
-                    # === 新增：大纲保存与加载功能 ===
                     with gr.Row():
                         outline_dropdown = gr.Dropdown(label="加载本地大纲", choices=[], interactive=True)
                         btn_load_outline = gr.Button("📂 加载", size="sm")
@@ -1002,7 +1054,6 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
                         outline_save_name = gr.Textbox(label="输入大纲名称 (用于保存)", placeholder="例如：第一卷细纲")
                         btn_save_outline = gr.Button("💾 保存到本地", variant="primary", size="sm")
                     outline_op_msg = gr.Markdown("")
-                    # ==================================
 
                     manual_outline_data = gr.Dataframe(
                         headers=["章节号", "章节名", "章节概要"],
@@ -1012,6 +1063,22 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
                         interactive=True, type="array", label="请在下方输入各章详细大纲"
                     )
                     btn_add_manual_row = gr.Button("➕ 新增一章大纲", size="sm")
+
+            # --- 新增 Tab: 人物设定库 ---
+            with gr.TabItem("🎭 人物设定库"):
+                gr.Markdown("在这里可以将填写好的「人物列表」保存为独立的设定文件，方便日后一键加载。")
+
+                with gr.Row():
+                    role_dropdown = gr.Dropdown(label="选择已有的人物设定文件", choices=[], interactive=True)
+                    btn_load_role = gr.Button("📂 加载选中的设定", size="sm")
+                    btn_refresh_roles = gr.Button("🔄 刷新设定列表", size="sm")
+
+                with gr.Row():
+                    role_save_name = gr.Textbox(label="人物设定名 (如: genshin，将自动保存为 .json)",
+                                                placeholder="输入设定名")
+                    btn_save_role = gr.Button("💾 将当前输入框保存为新设定", variant="primary", size="sm")
+
+                role_op_msg = gr.Markdown("")
 
             # Tab 2: 开发组设置
             with gr.TabItem("⚙️ 开发组设置 (数量/提示词/配置文件)"):
@@ -1214,13 +1281,14 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
                     outputs=[auth_msg, user_state, login_group, main_group, welcome_text])
     btn_login.click(FileManager.get_user_books, inputs=[input_user], outputs=[book_select])
     btn_login.click(on_user_login, inputs=[input_user], outputs=dropdowns_list)
-    # 登录时也一并获取最新的大纲列表
+    # 登录时也一并获取最新的大纲和人物列表
     btn_login.click(FileManager.get_manual_outlines, inputs=[input_user], outputs=[outline_dropdown])
+    btn_login.click(FileManager.get_user_roles, inputs=[input_user], outputs=[role_dropdown])
 
     btn_logout.click(UserManager.logout, inputs=[],
                      outputs=[user_state, auth_msg, login_group, main_group, welcome_text])
 
-    # === 新增：大纲操作事件绑定 ===
+    # === 大纲操作事件绑定 ===
     btn_save_outline.click(
         fn=FileManager.save_manual_outline,
         inputs=[user_state, outline_save_name, manual_outline_data],
@@ -1235,6 +1303,23 @@ with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.S
         fn=FileManager.get_manual_outlines,
         inputs=[user_state],
         outputs=[outline_dropdown]
+    )
+
+    # === 新增：人物设定操作事件绑定 ===
+    btn_save_role.click(
+        fn=FileManager.save_role_config,
+        inputs=[user_state, role_save_name, characters],
+        outputs=[role_op_msg, role_dropdown]
+    )
+    btn_load_role.click(
+        fn=FileManager.load_role_config,
+        inputs=[user_state, role_dropdown],
+        outputs=[characters, role_op_msg]
+    )
+    btn_refresh_roles.click(
+        fn=FileManager.get_user_roles,
+        inputs=[user_state],
+        outputs=[role_dropdown]
     )
     # ==============================
 
