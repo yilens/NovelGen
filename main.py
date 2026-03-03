@@ -35,7 +35,7 @@ ROLE_MAP = {
 def get_all_modes(username):
     """获取指定用户的所有可用配置文件"""
     if not username: return []
-    mode_dir = os.path.join("BOOKS", username, "modes")
+    mode_dir = os.path.join("NovelGen", username, "modes")
     if not os.path.exists(mode_dir): return []
     return sorted([f for f in os.listdir(mode_dir) if f.endswith('.json')])
 
@@ -95,7 +95,7 @@ class ModeManager:
             return "❌ 配置名不能为空", *[gr.update() for _ in range(6)]
 
         # ✅ 路径修改为用户专属目录
-        mode_dir = os.path.join("BOOKS", username, "modes")
+        mode_dir = os.path.join("NovelGen", username, "modes")
         os.makedirs(mode_dir, exist_ok=True)
 
         history = []
@@ -128,7 +128,7 @@ class FileManager:
     @staticmethod
     def get_user_books(username):
         if not username: return gr.update(choices=[], value=None)
-        user_dir = os.path.join("BOOKS", username)
+        user_dir = os.path.join("NovelGen", username, "Books")
         if not os.path.exists(user_dir):
             return gr.update(choices=[], value=None)
         # 排除了系统文件夹 (mode, outline等)
@@ -142,12 +142,12 @@ class FileManager:
         if not raw_title: return gr.update(visible=False, value=None), "❌ 尚未选择小说"
 
         book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title.strip())
-        book_dir = os.path.join("BOOKS", username, book_title)
+        book_dir = os.path.join("NovelGen", username, "Books", book_title)
 
         if not os.path.exists(book_dir):
             return gr.update(visible=False, value=None), f"❌ 找不到对应文件夹 ({book_dir})"
 
-        zip_base_path = os.path.join("BOOKS", username, f"{book_title}_完整包")
+        zip_base_path = os.path.join("NovelGen", username, "Books", f"{book_title}_完整包")
         shutil.make_archive(zip_base_path, 'zip', book_dir)
         return gr.update(value=f"{zip_base_path}.zip", visible=True), f"✅ 已打包 {book_title}，请点击下方区域下载。"
 
@@ -157,11 +157,11 @@ class FileManager:
         if not raw_title: return "❌ 尚未选择小说", gr.update()
 
         book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title.strip())
-        book_dir = os.path.join("BOOKS", username, book_title)
+        book_dir = os.path.join("NovelGen", username, "Books", book_title)
 
         if os.path.exists(book_dir):
             shutil.rmtree(book_dir)
-            zip_file_path = os.path.join("BOOKS", username, f"{book_title}_完整包.zip")
+            zip_file_path = os.path.join("NovelGen", username, "Books", f"{book_title}_完整包.zip")
             if os.path.exists(zip_file_path):
                 os.remove(zip_file_path)
             return f"✅ 成功删除小说: {book_title}", FileManager.get_user_books(username)
@@ -178,7 +178,7 @@ class FileManager:
     @staticmethod
     def get_manual_outlines(username):
         if not username: return gr.update(choices=[], value=None)
-        outline_dir = os.path.join("BOOKS", username, "outline")
+        outline_dir = os.path.join("NovelGen", username, "outline")
         if not os.path.exists(outline_dir):
             return gr.update(choices=[], value=None)
         outlines = [f for f in os.listdir(outline_dir) if f.endswith('.json')]
@@ -194,7 +194,7 @@ class FileManager:
         if not safe_name.endswith('.json'):
             safe_name += '.json'
 
-        outline_dir = os.path.join("BOOKS", username, "outline")
+        outline_dir = os.path.join("NovelGen", username, "outline")
         os.makedirs(outline_dir, exist_ok=True)
         filepath = os.path.join(outline_dir, safe_name)
 
@@ -210,7 +210,7 @@ class FileManager:
         if not username or not outline_file:
             return gr.update(), "❌ 尚未选择大纲文件"
 
-        filepath = os.path.join("BOOKS", username, "outline", outline_file)
+        filepath = os.path.join("NovelGen", username, "outline", outline_file)
         if not os.path.exists(filepath):
             return gr.update(), f"❌ 找不到文件: {outline_file}"
 
@@ -264,7 +264,7 @@ class AgentWorkflow:
         raw_title = self.config.get("book_title", "未命名小说").strip()
         self.book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title) or "未命名小说"
 
-        self.book_dir = os.path.join("BOOKS", self.username, self.book_title)
+        self.book_dir = os.path.join("NovelGen", self.username, "Books", self.book_title)
         self.err_dir = os.path.join(self.book_dir, "err")
         os.makedirs(self.err_dir, exist_ok=True)
 
@@ -408,7 +408,7 @@ class AgentWorkflow:
         mode_key = role_to_config_key.get(base_role)
         selected_mode_file = self.config.get(mode_key, "")
 
-        mode_dir = os.path.join("BOOKS", self.username, "modes")
+        mode_dir = os.path.join("NovelGen", self.username, "modes")
         mode_file = os.path.join(mode_dir, selected_mode_file) if selected_mode_file else ""
         mode_data = {}
 
@@ -870,7 +870,7 @@ def on_user_login(username):
     if not username:
         return [gr.update(choices=[], value=None)] * 6
 
-    mode_dir = os.path.join("BOOKS", username, "modes")
+    mode_dir = os.path.join("NovelGen", username, "modes")
     # ✅ 登录时，检测并为该用户生成默认配置文件
     mode.init_modes(mode_dir)
 
