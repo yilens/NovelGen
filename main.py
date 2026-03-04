@@ -950,13 +950,44 @@ def load_config(username=None):
 
 def save_config_json(username, config_dict):
     if not username: return "❌ 请先登录！"
+
+    # 1. 保存全局配置 (UI恢复用)
     dir_path = os.path.join("NovelGen", username)
     os.makedirs(dir_path, exist_ok=True)
     path = os.path.join(dir_path, "user_input.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(config_dict, f, ensure_ascii=False, indent=4)
+
+    # 2. 【新增】保存该书专属配置
+    book_title = config_dict.get("book_title", "").strip()
+    if book_title:
+        safe_title = re.sub(r'[\\/:*?"<>|]', '_', book_title)
+        book_dir = os.path.join("NovelGen", username, "Books", safe_title)
+        os.makedirs(book_dir, exist_ok=True)
+        book_conf_path = os.path.join(book_dir, "book_config.json")
+        with open(book_conf_path, "w", encoding="utf-8") as f:
+            json.dump(config_dict, f, ensure_ascii=False, indent=4)
+
     return "✅ 配置已成功保存！"
 
+
+def load_book_config(username, raw_title):
+    if not username or not raw_title:
+        return gr.update(), gr.update(), gr.update(), "⚠️ 请先登录并输入需要加载的书名"
+
+    safe_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title.strip())
+    book_conf_path = os.path.join("NovelGen", username, "Books", safe_title, "book_config.json")
+
+    if os.path.exists(book_conf_path):
+        with open(book_conf_path, "r", encoding="utf-8") as f:
+            conf = json.load(f)
+        return (
+            gr.update(value=conf.get("outline", "")),
+            gr.update(value=conf.get("style", "")),
+            gr.update(value=conf.get("characters", "")),
+            f"✅ 成功加载《{raw_title}》的历史配置！"
+        )
+    return gr.update(), gr.update(), gr.update(), "⚠️ 未找到该书的专属配置文件，请确认书名是否正确。"
 
 def read_txt_file(file_obj):
     if file_obj is not None:
@@ -1159,7 +1190,10 @@ def build_ui():
             with gr.Tabs():
                 # Tab 1: 用户输入
                 with gr.TabItem("✍️ 用户输入 (剧情/设定)"):
-                    book_title = gr.Textbox(label="书名 (必选)", value=init_conf.get("book_title", ""))
+                    with gr.Row():
+                        book_title = gr.Textbox(label="书名 (必选)", value=init_conf.get("book_title", ""), scale=4)
+                        btn_load_book = gr.Button("📂 加载该书历史设定", scale=1)
+                    load_book_msg = gr.Markdown("")
                     with gr.Row():
                         outline = gr.Textbox(label="剧情总大纲 (未启用人工大纲时必选)", lines=5,
                                              value=init_conf.get("outline", ""))
@@ -1386,6 +1420,12 @@ def build_ui():
                                   outputs=[new_mode_history])
 
         # 保存预设相关
+        btn_load_book.click(
+            fn=load_book_config,
+            inputs=[user_state, book_title],
+            outputs=[outline, style, characters, load_book_msg]
+        )
+
         btn_save_mode.click(fn=ModeManager.save_mode,
                             inputs=[user_state, new_mode_name, new_mode_sys, new_mode_intro, new_mode_history],
                             outputs=[mode_save_msg] + [agent_mode_dropdowns[en] for _, en, _ in AGENT_NAMES_MAP])
