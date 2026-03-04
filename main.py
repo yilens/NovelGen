@@ -275,6 +275,91 @@ class FileManager:
             return gr.update(), f"❌ 读取失败: {e}"
 
 
+class EditManager:
+    """管理已生成章节的在线读取、修改与服务器同步覆写"""
+
+    @staticmethod
+    def get_generated_chapters(username, raw_title):
+        if not username or not raw_title:
+            return gr.update(choices=[], value=None)
+
+        book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title.strip())
+        full_file = os.path.join("NovelGen", username, "Books", book_title, f"{book_title}_full_volume.txt")
+
+        if not os.path.exists(full_file):
+            return gr.update(choices=[], value=None)
+
+        content = FileManager.safe_read(full_file)
+        chapters = []
+        matches = re.finditer(r"第(\d+)章\n", content)
+        for m in matches:
+            chapters.append(f"第{m.group(1)}章")
+
+        # 去重并排序
+        chapters = sorted(list(set(chapters)), key=lambda x: int(re.search(r'\d+', x).group()))
+        return gr.update(choices=chapters, value=chapters[-1] if chapters else None)
+
+    @staticmethod
+    def load_chapter(username, raw_title, chapter_str):
+        if not username or not raw_title or not chapter_str:
+            return "", "", "❌ 请先选择小说和章节"
+
+        book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title.strip())
+        book_dir = os.path.join("NovelGen", username, "Books", book_title)
+        full_file = os.path.join(book_dir, f"{book_title}_full_volume.txt")
+        comp_file = os.path.join(book_dir, f"{book_title}_compressed_volume.txt")
+
+        ch_num = re.search(r'\d+', chapter_str).group()
+
+        # 加载正文
+        full_text = FileManager.safe_read(full_file)
+        text_match = re.search(rf"第{ch_num}章\n(.*?)(?=\n\n第\d+章\n|$)", full_text, re.DOTALL)
+        chapter_content = text_match.group(1).strip() if text_match else ""
+
+        # 加载摘要
+        comp_text = FileManager.safe_read(comp_file)
+        sum_match = re.search(rf"第{ch_num}卷剧情：(.*?)(?=\n第\d+卷剧情：|$)", comp_text, re.DOTALL)
+        chapter_summary = sum_match.group(1).strip() if sum_match else ""
+
+        return chapter_content, chapter_summary, f"✅ 成功加载 {chapter_str} 的数据，可以开始修改。"
+
+    @staticmethod
+    def save_chapter(username, raw_title, chapter_str, new_content, new_summary):
+        if not username or not raw_title or not chapter_str:
+            return "❌ 缺少必要信息，请确保已登录并选择小说"
+
+        book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title.strip())
+        book_dir = os.path.join("NovelGen", username, "Books", book_title)
+        full_file = os.path.join(book_dir, f"{book_title}_full_volume.txt")
+        comp_file = os.path.join(book_dir, f"{book_title}_compressed_volume.txt")
+
+        ch_num = re.search(r'\d+', chapter_str).group()
+
+        # 覆写正文 (使用字符串切片替换，避免直接使用 re.sub 导致的特殊字符转义报错)
+        full_text = FileManager.safe_read(full_file)
+        text_match = re.search(rf"(第{ch_num}章\n)(.*?)(?=\n\n第\d+章\n|$)", full_text, re.DOTALL)
+        if text_match:
+            start, end = text_match.span(2)
+            full_text = full_text[:start] + new_content.strip() + full_text[end:]
+        else:
+            return "❌ 同步失败：未能在服务器源文件中定位到该章节的【正文】段落格式。"
+
+        # 覆写摘要
+        comp_text = FileManager.safe_read(comp_file)
+        sum_match = re.search(rf"(第{ch_num}卷剧情：)(.*?)(?=\n第\d+卷剧情：|$)", comp_text, re.DOTALL)
+        if sum_match:
+            start, end = sum_match.span(2)
+            comp_text = comp_text[:start] + new_summary.strip() + comp_text[end:]
+        else:
+            return "❌ 同步失败：未能在服务器源文件中定位到该章节的【摘要】段落格式。"
+
+        # 写入物理文件
+        with open(full_file, "w", encoding="utf-8") as f:
+            f.write(full_text)
+        with open(comp_file, "w", encoding="utf-8") as f:
+            f.write(comp_text)
+
+        return f"✅ 修改已成功同步至服务器！下次生成将基于 {chapter_str} 的最新版本继续推进。"
 # ==========================================
 # API 客户端服务层
 # ==========================================
@@ -1401,6 +1486,29 @@ def build_ui():
                     fm_msg = gr.Textbox(label="文件操作状态", interactive=False)
                     fm_download_file = gr.File(label="获取成功！点击下载压缩包", interactive=False, visible=False)
 
+                    # Tab 6: 章节内容人工修改与同步
+                    with gr.TabItem("✍️ 章节编辑与同步"):
+                        gr.Markdown("### 📝 服务器本地章节内容修改")
+                        gr.Markdown(
+                            "如果AI生成的某一章偏离了预期，请先在【控制台】点击⏸暂停，然后在这里读取并修改错误章节的内容与摘要。**保存后，后续生成将基于你的修改版本继续。**")
+
+                        with gr.Row():
+                            edit_book_select = gr.Dropdown(label="选择要修改的小说", choices=[], interactive=True)
+                            btn_refresh_edit_books = gr.Button("🔄 刷新小说列表", scale=1)
+
+                        with gr.Row():
+                            edit_chapter_select = gr.Dropdown(label="选择要修改的章节", choices=[], interactive=True)
+                            btn_load_chapter = gr.Button("📂 获取该章内容", scale=1)
+
+                        edit_status = gr.Markdown("")
+
+                        with gr.Row():
+                            edit_chapter_content = gr.Textbox(
+                                label="章节正文 (修改此项会纠正开发者的文风和近期前情提要)", lines=20)
+                            edit_chapter_summary = gr.Textbox(label="章节摘要 (修改此项会纠正设计者的大纲走向判断)",
+                                                              lines=20)
+
+                        btn_save_chapter_edit = gr.Button("💾 保存修改并同步覆写至服务器", variant="primary")
         # ==========================================
         # 严格收集所有 Inputs，顺序必须与 build_config_dict 对应
         # ==========================================
@@ -1409,7 +1517,7 @@ def build_ui():
             use_manual_outline, manual_outline_data,
             global_prompt, custom_style_prompt,
             need_dev_revise, use_ai_cleaner, use_archiver,
-            context_max_chars,  # <--- 【新增这一行】
+            context_max_chars,
             api_type, api_keys, api_url, api_model,
             fallback_api_type, fallback_api_keys, fallback_api_url, fallback_api_model
         ]
@@ -1478,7 +1586,15 @@ def build_ui():
                                 outputs=[fm_download_file, fm_msg])
         btn_delete_book.click(FileManager.delete_user_book, inputs=[user_state, book_select],
                               outputs=[fm_msg, book_select])
-
+        btn_refresh_edit_books.click(FileManager.get_user_books, inputs=[user_state], outputs=[edit_book_select])
+        edit_book_select.change(EditManager.get_generated_chapters, inputs=[user_state, edit_book_select],
+                                outputs=[edit_chapter_select])
+        btn_load_chapter.click(EditManager.load_chapter, inputs=[user_state, edit_book_select, edit_chapter_select],
+                               outputs=[edit_chapter_content, edit_chapter_summary, edit_status])
+        btn_save_chapter_edit.click(EditManager.save_chapter,
+                                    inputs=[user_state, edit_book_select, edit_chapter_select, edit_chapter_content,
+                                            edit_chapter_summary], outputs=[edit_status])
+        login_event.then(FileManager.get_user_books, inputs=[user_state], outputs=[edit_book_select])
     return demo
 
 
