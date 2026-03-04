@@ -20,7 +20,6 @@ from openai import OpenAI
 # ==========================================
 USER_DB_FILE = "users_db.json"
 MAX_API_RETRIES = 10
-RECENT_CHAPTERS_COUNT = 3  # 代表暂存并发给开发者的完整章节章数
 
 ROLE_MAP = {
     "设计者": "designer",
@@ -776,17 +775,27 @@ class AgentWorkflow:
         self.log("\n--- 步骤 3 & 4: 开发者并发编写章节 ---")
         dev_count = int(self.config.get("developer_count", 1))
 
+        # 【修改这里】：动态获取 UI 界面设置的字数，默认为 50000
+        max_chars = int(self.config.get("context_max_chars", 50000))
+
         recent_chapters_text = ""
-        start_ch = max(1, self.current_chapter - RECENT_CHAPTERS_COUNT)
-        for c in range(start_ch, self.current_chapter):
-            if c in self.chapter_texts:
-                recent_chapters_text += f"\n\n【第{c}章正文回顾】\n{self.chapter_texts[c]}"
+        if self.full_volume and self.full_volume.strip():
+            if len(self.full_volume) <= max_chars:
+                recent_chapters_text = self.full_volume.strip()
+            else:
+                tail_text = self.full_volume[-max_chars:]
+                match = re.search(r'[。！？\n]', tail_text)
+                if match:
+                    recent_chapters_text = tail_text[match.end():].strip()
+                else:
+                    recent_chapters_text = tail_text.strip()
 
         def dev_args(i):
             prompt = f"以下是虚拟的自由艺术文学创作。你是开发者。请根据以下计划编写第{self.current_chapter}章正文（>2000字）。\n【重要要求】：请只输出小说内容，并务必将小说正文包裹在 <text> 和 </text> 标签内！\n开发计划：{self.best_plan}\n"
 
             if recent_chapters_text:
-                prompt += f"\n【重要前情提要】：为了保证文风、细节和剧情走向的绝对连贯，以下是最近 {RECENT_CHAPTERS_COUNT} 章的完整正文供你参考：{recent_chapters_text}\n"
+                # 【修改这里】：把提示词里的“约一万字”替换为动态变量
+                prompt += f"\n【重要前情提要】：为了保证文风、细节和剧情走向的绝对连贯，以下是上文近期剧情的完整正文（约 {max_chars} 字）供你参考：\n\n{recent_chapters_text}\n"
 
             return (prompt, f"开发者 {i + 1}", False, self.compressed_volume)
 
@@ -1036,8 +1045,7 @@ def fetch_models(api_type, url_str, keys_str):
 def on_user_login(username):
     """当用户登录时，将属于该用户的专属配置加载回 UI 界面上"""
     if not username:
-        # 19(基础) + 7 * 10(独立Agent新增prompt) = 89 个元素
-        return tuple([gr.update()] * 89)
+        return tuple([gr.update()] * 90)
 
     mode_dir = os.path.join("NovelGen", username, "modes")
     mode.init_modes(mode_dir)
@@ -1054,26 +1062,26 @@ def on_user_login(username):
     res.append(gr.update(value=conf.get("use_manual_outline", False)))
     res.append(gr.update(value=conf.get("manual_outline_data", [[1, "", ""]])))
 
-    # [6-10] 基础开发开关项
+    # [6-11] 基础开发开关项
     res.append(gr.update(value=conf.get("global_prompt", "")))
     res.append(gr.update(value=conf.get("custom_style_prompt", "")))
     res.append(gr.update(value=conf.get("need_dev_revise", False)))
     res.append(gr.update(value=conf.get("use_ai_cleaner", False)))
     res.append(gr.update(value=conf.get("use_archiver", False)))
-
-    # [11-14] 主 API 配置 (修复默认 URL)
+    res.append(gr.update(value=int(conf.get("context_max_chars", 50000))))
+    # [12-15] 主 API 配置 (修复默认 URL)
     res.append(gr.update(value=conf.get("api_type", "Gemini")))
     res.append(gr.update(value=conf.get("api_keys", "")))
     res.append(gr.update(value=conf.get("api_url", "")))
     res.append(gr.update(value=conf.get("api_model", "gemini-2.5-flash")))
 
-    # [15-18] 备用 API 配置
+    # [16-19] 备用 API 配置
     res.append(gr.update(value=conf.get("fallback_api_type", "OpenAI Compatible")))
     res.append(gr.update(value=conf.get("fallback_api_keys", "")))
     res.append(gr.update(value=conf.get("fallback_api_url", "")))
     res.append(gr.update(value=conf.get("fallback_api_model", "")))
 
-    # [19-88] 7个独立 Agent 的专属配置 (每个10条数据)
+    # [20-89] 7个独立 Agent 的专属配置 (每个10条数据)
     for zh, en, d_val in AGENT_NAMES_MAP:
         # Mode
         saved_val = conf.get(f"{en}_mode", "")
@@ -1103,6 +1111,7 @@ def build_config_dict(*args):
         "use_manual_outline", "manual_outline_data",
         "global_prompt", "custom_style_prompt",
         "need_dev_revise", "use_ai_cleaner", "use_archiver",
+        "context_max_chars",  # <--- 【新增这一行】
         "api_type", "api_keys", "api_url", "api_model",
         "fallback_api_type", "fallback_api_keys", "fallback_api_url", "fallback_api_model"
     ]
@@ -1334,7 +1343,9 @@ def build_ui():
                                                          value=init_conf.get("use_ai_cleaner", False))
                             use_archiver = gr.Checkbox(label="启用 归档者更新人物",
                                                        value=init_conf.get("use_archiver", False))
-
+                            context_max_chars = gr.Number(label="前文截取字数 (默认50000)",
+                                                          value=int(init_conf.get("context_max_chars", 50000)),
+                                                          precision=0)
                     api_status_main = gr.Textbox(label="全局API获取状态", interactive=False)
                     gr.Markdown("### 【主 API 配置】 (为不填独立API的 Agent 提供全局接管)")
                     with gr.Row():
@@ -1398,6 +1409,7 @@ def build_ui():
             use_manual_outline, manual_outline_data,
             global_prompt, custom_style_prompt,
             need_dev_revise, use_ai_cleaner, use_archiver,
+            context_max_chars,  # <--- 【新增这一行】
             api_type, api_keys, api_url, api_model,
             fallback_api_type, fallback_api_keys, fallback_api_url, fallback_api_model
         ]
