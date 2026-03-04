@@ -973,9 +973,9 @@ def fetch_models(api_type, url_str, keys_str):
     try:
         models = []
         if api_type == "Gemini":
-            # 修复：移除 markdown 的污染，使用干净的 https 链接
+            # 【修改处】修复：移除 markdown 的污染，使用干净的 https 链接
             req = urllib.request.Request(
-                f"[https://generativelanguage.googleapis.com/v1beta/models?key=](https://generativelanguage.googleapis.com/v1beta/models?key=){api_key}")
+                f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}")
             with urllib.request.urlopen(req, timeout=10) as response:
                 data = json.loads(response.read().decode('utf-8'))
                 models = [m['name'].replace('models/', '') for m in data.get('models', []) if 'name' in m]
@@ -1033,8 +1033,7 @@ def on_user_login(username):
     # [11-14] 主 API 配置 (修复默认 URL)
     res.append(gr.update(value=conf.get("api_type", "Gemini")))
     res.append(gr.update(value=conf.get("api_keys", "")))
-    res.append(gr.update(value=conf.get("api_url",
-                                        "[https://generativelanguage.googleapis.com](https://generativelanguage.googleapis.com)")))
+    res.append(gr.update(value=conf.get("api_url", "")))
     res.append(gr.update(value=conf.get("api_model", "gemini-2.5-flash")))
 
     # [15-18] 备用 API 配置
@@ -1054,7 +1053,7 @@ def on_user_login(username):
         # Count
         res.append(gr.update(value=int(conf.get(f"{en}_count", 1))))
         # Params (Temp, Top P, Top K)
-        res.append(gr.update(value=float(conf.get(f"{en}_temperature", 0.7))))
+        res.append(gr.update(value=float(conf.get(f"{en}_temperature", 0.9))))
         res.append(gr.update(value=float(conf.get(f"{en}_top_p", 0.9))))
         res.append(gr.update(value=int(conf.get(f"{en}_top_k", 40))))
         # Agent API Config
@@ -1137,7 +1136,7 @@ def toggle_pause():
 # ==========================================
 def build_ui():
     with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("## 📚 自闭环 AI 小说自动生成器 (并发加速 WebUI 版)")
+        gr.Markdown("## 📚 自闭环 AI 小说自动生成器")
         user_state = gr.State("")
 
         with gr.Group(visible=True) as login_group:
@@ -1295,11 +1294,11 @@ def build_ui():
                             custom_style_prompt = gr.Textbox(label="自定义写作风格 (仅向开发者追加)", lines=3,
                                                              value=init_conf.get("custom_style_prompt", ""))
                         with gr.Column(scale=1):
-                            need_dev_revise = gr.Checkbox(label="需要开发者修改 (触发检视/裁判环节)",
+                            need_dev_revise = gr.Checkbox(label="启用 开发者修改文本 (触发检视/裁判环节)",
                                                           value=init_conf.get("need_dev_revise", False))
-                            use_ai_cleaner = gr.Checkbox(label="启用 AI 清洗者 (不勾选则正则快速提取)",
+                            use_ai_cleaner = gr.Checkbox(label="启用 清洗者提取正文 (不勾选则正则快速提取)",
                                                          value=init_conf.get("use_ai_cleaner", False))
-                            use_archiver = gr.Checkbox(label="启用人物归档者 (根据最新剧情自动更新人物)",
+                            use_archiver = gr.Checkbox(label="启用 归档者更新人物",
                                                        value=init_conf.get("use_archiver", False))
 
                     api_status_main = gr.Textbox(label="全局API获取状态", interactive=False)
@@ -1310,8 +1309,8 @@ def build_ui():
                         api_keys = gr.Textbox(label="主 API Keys (多个用逗号隔开)", type="password",
                                               value=init_conf.get("api_keys", ""))
                     with gr.Row():
-                        api_url = gr.Textbox(label="主 API URL", value=init_conf.get("api_url",
-                                                                                     "[https://generativelanguage.googleapis.com](https://generativelanguage.googleapis.com)"))
+                        # 【修改处】移除硬编码的脏数据 URL，默认置空
+                        api_url = gr.Textbox(label="主 API URL", value=init_conf.get("api_url", ""))
                         api_model = gr.Dropdown(label="主 API 模型",
                                                 choices=[init_conf.get("api_model", "gemini-2.5-flash")],
                                                 value=init_conf.get("api_model", "gemini-2.5-flash"),
@@ -1433,4 +1432,4 @@ def build_ui():
 
 if __name__ == "__main__":
     demo = build_ui()
-    demo.launch(server_name="0.0.0.0", server_port=7860, inbrowser=True)
+    demo.launch(server_name="0.0.0.0", server_port=7860, inbrowser=True, share=True)
