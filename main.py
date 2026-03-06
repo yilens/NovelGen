@@ -1,6 +1,8 @@
+# author: YilEnS e1351599@u.nus.edu
+
 import gradio as gr
 import threading, json, os, re, urllib.request, urllib.error, time, random, shutil
-import mode  # 引入自定义的mode模块
+import mode
 from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from google.genai import types
@@ -93,7 +95,8 @@ def get_all_modes(username: str):
 
 
 def safe_name(name):
-    return re.sub(r'[\\/:*?"<>|]', '_', name.strip())
+    # 防目录越权穿越及特殊字符
+    return re.sub(r'[\\/:*?"<>|.]', '_', name.strip())
 
 
 # ==========================================
@@ -102,8 +105,8 @@ def safe_name(name):
 class UserManager:
     @staticmethod
     def register(username, password):
-        username = username.strip()
-        if not username or not password: return "❌ 注册失败：用户名和密码不能为空！"
+        username = safe_name(username)  # 修复安全隐患
+        if not username or not password: return "❌ 注册失败：用户名(含非规字符)和密码不能为空！"
         users = load_json(USER_DB_FILE)
         if username in users: return "❌ 注册失败：用户名已存在，请换一个重试！"
         users[username] = password
@@ -112,7 +115,7 @@ class UserManager:
 
     @staticmethod
     def login(username, password):
-        username = username.strip()
+        username = safe_name(username)
         if load_json(USER_DB_FILE).get(username) != password:
             return "❌ 登录失败：用户名或密码错误！", "", gr.update(visible=True), gr.update(visible=False), ""
         return "✅ 登录成功！", username, gr.update(visible=False), gr.update(visible=True), f"### 👤 当前用户：{username}"
@@ -261,13 +264,14 @@ class EditManager:
 
         t_m = re.search(rf"(第{ch_num}章\n)(.*?)(?=\n\n第\d+章\n|$)", f_text, re.DOTALL)
         if t_m:
-            f_text = f_text[:t_m.start(2)] + new_content.strip() + f_text[t_m.end(2):]
+            # BUG 修复: 增加换行容错，避免与后续章节内容完全贴合重叠在一起
+            f_text = f_text[:t_m.start(2)] + new_content.strip() + "\n\n" + f_text[t_m.end(2):].lstrip()
         else:
             return "❌ 同步失败：正文定位失败"
 
         s_m = re.search(rf"(第{ch_num}卷剧情：)(.*?)(?=\n第\d+卷剧情：|$)", c_text, re.DOTALL)
         if s_m:
-            c_text = c_text[:s_m.start(2)] + new_summary.strip() + c_text[s_m.end(2):]
+            c_text = c_text[:s_m.start(2)] + new_summary.strip() + "\n" + c_text[s_m.end(2):].lstrip()
         else:
             return "❌ 同步失败：摘要定位失败"
 
@@ -320,8 +324,9 @@ class LLMService:
                          {"role": "assistant", "content": f"以下是我之前已经完成的剧情摘要：\n{history_text}"}])
         msgs.append({"role": "user", "content": final_prompt})
         return \
-        client.chat.completions.create(model=model_name, messages=msgs, temperature=temperature, top_p=top_p).choices[
-            0].message.content
+            client.chat.completions.create(model=model_name, messages=msgs, temperature=temperature,
+                                           top_p=top_p).choices[
+                0].message.content
 
 
 class APIKeyManager:
@@ -440,7 +445,8 @@ class AgentWorkflow:
         self.run_event.set()
 
     def stop(self):
-        self.is_running = False; self.run_event.set()
+        self.is_running = False;
+        self.run_event.set()
 
     def call_llm(self, prompt, role="Agent", use_fallback=False, history_text=""):
         self.run_event.wait()
@@ -506,8 +512,17 @@ class AgentWorkflow:
         return None
 
     def _extract_score(self, text):
+        # 首先尝试精确匹配带有“分数”、“得分”等前缀的格式
         match = re.search(r'(?:分数|Score|得分)[:：]?\s*(\d{1,3})', text or "", re.IGNORECASE)
-        return int(match.group(1)) if match else 50
+        if match:
+            return int(match.group(1))
+
+        # 兼容处理：直接提取文本中最先出现的 1-3 位独立数字
+        match_fallback = re.search(r'(?<!\d)(\d{1,3})(?!\d)', text or "")
+        if match_fallback:
+            return int(match_fallback.group(1))
+        # 找不到分数时返回 None，作为废票处理
+        return None
 
     def _execute_parallel(self, limit, count, func, args_gen):
         with ThreadPoolExecutor(max_workers=max(1, min(limit, count))) as pool:
@@ -517,13 +532,27 @@ class AgentWorkflow:
         if not candidates: return None, -1, 0
         if len(candidates) == 1: return candidates[0], 100, 0
 
-        rev_count = int(self.config.get("reviewer_count", 1))
+        # BUG 修复：防止获取到 0 导致后续的除以0崩溃
+        rev_count = max(1, int(self.config.get("reviewer_count", 1)))
+
         scores_text = self._execute_parallel(len(candidates) * rev_count, len(candidates) * rev_count, self.call_llm,
                                              lambda i: (review_prompt_tpl.format(content=candidates[i // rev_count]),
                                                         f"{reviewer_role}(方案{i // rev_count + 1}-{i % rev_count + 1})"))
 
-        scores = [sum(self._extract_score(t) for t in scores_text[i * rev_count:(i + 1) * rev_count]) / rev_count for i
-                  in range(len(candidates))]
+        # --- 修改部分：动态计算有效打分的平均值 ---
+        scores = []
+        for i in range(len(candidates)):
+            # 获取当前方案对应的所有评审回复
+            candidate_texts = scores_text[i * rev_count:(i + 1) * rev_count]
+
+            # 提取有效分数，忽略 None (废票)
+            valid_scores = [s for t in candidate_texts if (s := self._extract_score(t)) is not None]
+
+            # 如果有有效分数，则求平均；如果全员废票，则给保底 0 分，避免 len(valid_scores) 为 0 导致报错
+            avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else 0
+            scores.append(avg_score)
+        # ----------------------------------------
+
         best_idx = scores.index(max(scores))
 
         self.log("\n--- 评审结果汇总 ---")
@@ -574,11 +603,11 @@ class AgentWorkflow:
                                           int(self.config.get("developer_count", 1)), self.call_llm, dev_args)
         if not chapters or not self.is_running: return False
 
-        best_chapter, _, best_idx = self._evaluate_candidates(chapters, "打分(0-100)，输出'分数: X'\n内容：{content}",
-                                                              "评审者(打分)")
+        review_prompt = f"请根据以下本章计划进行严格审查，判断正文是否偏离大纲。打分(0-100)，输出'分数: X'。\n【本章计划】：{self.best_plan}\n\n【正文内容】：{{content}}"
+        best_chapter, _, best_idx = self._evaluate_candidates(chapters, review_prompt, "评审者(打分)")
 
         if self.config.get("need_dev_revise", False):
-            feedback = self.call_llm(f"对以下章节提出需修改意见(勿夸奖)\n章节：{best_chapter}", "评审者(检视)")
+            feedback = self.call_llm(f"请对比【本章计划】，指出【正文】中未完成的情节或需要修改的瑕疵(勿夸奖，务必严厉)。\n【本章计划】：{self.best_plan}\n\n【正文】：{best_chapter}", "评审者(检视)")
             if self._extract_score(self.call_llm(f"评估意见是否合理，打分(0-100)\n{feedback}", "裁判者")) >= 80:
                 best_chapter = self.call_llm(f"根据意见重修章节，包裹在 <text> 内！\n原：{best_chapter}\n意见：{feedback}",
                                              f"开发者 {best_idx + 1}")
@@ -592,13 +621,29 @@ class AgentWorkflow:
                                                                      best_chapter).strip()
 
         if self.config.get("use_archiver", False):
-            archive_res = self.call_llm(
-                f"原设定：\n{self.current_characters}\n最新章节：\n{final_text}\n判断是否需更新人物设定，需要则直接输出完整设定，不需要则输出【无需更新】",
-                "归档者")
+            # 重构提示词，明确“温度”和“准确度”的要求
+            archive_prompt = (
+                f"【当前人物设定】：\n{self.current_characters}\n\n"
+                f"【最新章节正文】：\n{final_text}\n\n"
+                "【任务指令】：\n"
+                "1. 请仔细阅读最新章节，分析人物是否发生了以下变化：新增出场人物、社会关系转变、心理/情感的深度蜕变（温度）、以及身份/物品的客观改变（准确度）。\n"
+                "2. 如果没有任何值得记录的实质性变化，请严格且仅输出【无需更新】四个字，不要有任何多余标点。\n"
+                "3. 如果需要更新，请在【当前人物设定】的格式基础上进行增补和润色。保持原有的数据结构（如 JSON或列表格式）绝对不变。\n"
+                "4. 描述人物变化时，用词要生动具体，保留人物的灵魂与温度。\n"
+                "5. 请直接输出更新后的完整设定，绝不要包含“好的”、“以下是”等废话，也不要包裹 markdown 代码块标签（如 ```json）。"
+            )
+
+            archive_res = self.call_llm(archive_prompt, "归档者")
+
             if archive_res and "无需更新" not in archive_res:
-                self.current_characters = re.sub(r'^(好的|明白|以下是).*?\n', '', archive_res).strip().removeprefix(
-                    "```json").removeprefix("```").removesuffix("```").strip()
+                # 增强正则清洗能力，防止模型依然输出多余前缀/后缀
+                clean_res = re.sub(r'^(好的|明白|没问题|以下是).*?\n', '', archive_res, flags=re.IGNORECASE).strip()
+                clean_res = clean_res.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+                self.current_characters = clean_res
                 save_json(self.role_file, {"characters": self.current_characters})
+                self.log("📂 归档者已捕捉到剧情变化，成功更新人物温度与设定！")
+            else:
+                self.log("📂 归档者判断本章无重大设定变更，无需更新。")
 
         self.full_volume += f"\n\n第{self.current_chapter}章\n{final_text}"
         self.chapter_texts[self.current_chapter], self.best_chapter = final_text, best_chapter
@@ -681,11 +726,9 @@ def fetch_models(api_type, url_str, keys_str):
     api_key = keys_str.split(',')[0].strip()
     try:
         if api_type == "Gemini":
-            req = urllib.request.Request(
-                f"[https://generativelanguage.googleapis.com/v1beta/models?key=](https://generativelanguage.googleapis.com/v1beta/models?key=){api_key}")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                models = [m['name'].replace('models/', '') for m in
-                          json.loads(resp.read().decode('utf-8')).get('models', []) if 'name' in m]
+            # 直接使用 genai SDK 获取模型列表，不需要传入冗余的 URL
+            client = genai.Client(api_key=api_key)
+            models = [m.name.replace('models/', '') for m in client.models.list()]
         else:
             base_url = url_str.rstrip('/')
             headers = {"Authorization": f"Bearer {api_key}"}
@@ -746,8 +789,12 @@ def start_generation(username, *args):
         app_state.thread.start()
 
     while app_state.workflow and (app_state.workflow.is_running or app_state.thread.is_alive()):
-        yield app_state.log_text, gr.update(value="⏸ 暂停", interactive=True)
+        # BUG 修复：不应强硬每次yield都改回"⏸ 暂停"，根据工作流的真实状态动态下发文本，避免状态闪烁跳回。
+        is_paused = not app_state.workflow.run_event.is_set()
+        btn_text = "▶ 继续" if is_paused else "⏸ 暂停"
+        yield app_state.log_text, gr.update(value=btn_text, interactive=True)
         time.sleep(0.5)
+
     yield app_state.log_text, gr.update(value="▶ 开始生成", interactive=True)
 
 
@@ -970,4 +1017,4 @@ def build_ui():
 
 if __name__ == "__main__":
     demo = build_ui()
-    demo.launch(server_name="0.0.0.0", server_port=7860, inbrowser=True, share=True)
+    demo.launch(server_name="0.0.0.0", server_port=7860, inbrowser=True)
