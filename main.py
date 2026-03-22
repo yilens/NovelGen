@@ -11,7 +11,6 @@ from openai import OpenAI
 # ==========================================
 # 常量配置与全局初始化
 # ==========================================
-USER_DB_FILE = "users_db.json"
 MAX_API_RETRIES = 10
 
 ROLE_MAP = {
@@ -84,13 +83,12 @@ def write_file(filepath, content):
     with open(filepath, "w", encoding="utf-8") as f: f.write(content)
 
 
-def get_user_dir(username, *subdirs):
-    return os.path.join("NovelGen", username, *subdirs)
+def get_dir(*subdirs):
+    return os.path.join("NovelGen", *subdirs)
 
 
-def get_all_modes(username: str):
-    if not username: return []
-    mode_dir = get_user_dir(username, "modes")
+def get_all_modes():
+    mode_dir = get_dir("modes")
     return sorted([f for f in os.listdir(mode_dir) if f.endswith('.json')]) if os.path.exists(mode_dir) else []
 
 
@@ -102,33 +100,9 @@ def safe_name(name):
 # ==========================================
 # 数据与文件管理模块
 # ==========================================
-class UserManager:
-    @staticmethod
-    def register(username, password):
-        username = safe_name(username)  # 修复安全隐患
-        if not username or not password: return "❌ 注册失败：用户名(含非规字符)和密码不能为空！"
-        users = load_json(USER_DB_FILE)
-        if username in users: return "❌ 注册失败：用户名已存在，请换一个重试！"
-        users[username] = password
-        save_json(USER_DB_FILE, users)
-        return f"✅ 注册成功！欢迎加入，{username}。现在您可以直接点击“登录”。"
-
-    @staticmethod
-    def login(username, password):
-        username = safe_name(username)
-        if load_json(USER_DB_FILE).get(username) != password:
-            return "❌ 登录失败：用户名或密码错误！", "", gr.update(visible=True), gr.update(visible=False), ""
-        return "✅ 登录成功！", username, gr.update(visible=False), gr.update(visible=True), f"### 👤 当前用户：{username}"
-
-    @staticmethod
-    def logout():
-        return "", "", gr.update(visible=True), gr.update(visible=False), ""
-
-
 class ModeManager:
     @staticmethod
-    def save_mode(username, mode_name, sys_prompt, intro, history_data):
-        if not username: return "❌ 请先登录", *[gr.update() for _ in range(len(AGENT_NAMES_MAP))]
+    def save_mode(mode_name, sys_prompt, intro, history_data):
         if not mode_name.strip(): return "❌ 配置名不能为空", *[gr.update() for _ in range(len(AGENT_NAMES_MAP))]
 
         name = mode_name.strip()
@@ -136,66 +110,64 @@ class ModeManager:
 
         history = [{"user": str(r[0]).strip(), "model": str(r[1]).strip()} for r in history_data if
                    len(r) >= 2 and (str(r[0]).strip() or str(r[1]).strip())]
-        save_json(get_user_dir(username, "modes", name),
+        save_json(get_dir("modes", name),
                   {"system_prompt": sys_prompt.strip(), "intro": intro.strip(), "history": history})
 
-        modes = get_all_modes(username)
+        modes = get_all_modes()
         return f"✅ 预设 [{name}] 保存成功！", *[gr.update(choices=modes) for _ in range(len(AGENT_NAMES_MAP))]
 
 
 class FileManager:
     @staticmethod
-    def get_user_books(username):
-        if not username: return gr.update(choices=[], value=None)
-        user_dir = get_user_dir(username, "Books")
+    def get_books():
+        user_dir = get_dir("Books")
         books = [d for d in os.listdir(user_dir) if
                  os.path.isdir(os.path.join(user_dir, d)) and d not in ["mode", "modes", "outline",
                                                                         "roles"]] if os.path.exists(user_dir) else []
         return gr.update(choices=books, value=books[0] if books else None)
 
     @staticmethod
-    def export_book_folder(username, raw_title):
-        if not username or not raw_title: return gr.update(visible=False, value=None), "❌ 缺少必要信息"
-        book_title, book_dir = safe_name(raw_title), get_user_dir(username, "Books", safe_name(raw_title))
+    def export_book_folder(raw_title):
+        if not raw_title: return gr.update(visible=False, value=None), "❌ 缺少书名信息"
+        book_title, book_dir = safe_name(raw_title), get_dir("Books", safe_name(raw_title))
         if not os.path.exists(book_dir): return gr.update(visible=False, value=None), f"❌ 找不到对应文件夹"
 
-        zip_base_path = get_user_dir(username, "Books", f"{book_title}_完整包")
+        zip_base_path = get_dir("Books", f"{book_title}_完整包")
         shutil.make_archive(zip_base_path, 'zip', book_dir)
         return gr.update(value=f"{zip_base_path}.zip", visible=True), f"✅ 已打包 {book_title}，请点击下载。"
 
     @staticmethod
-    def delete_user_book(username, raw_title):
-        if not username or not raw_title: return "❌ 缺少必要信息", gr.update()
+    def delete_book(raw_title):
+        if not raw_title: return "❌ 缺少书名信息", gr.update()
         book_title = safe_name(raw_title)
-        book_dir = get_user_dir(username, "Books", book_title)
+        book_dir = get_dir("Books", book_title)
         if os.path.exists(book_dir):
             shutil.rmtree(book_dir)
-            zip_file = get_user_dir(username, "Books", f"{book_title}_完整包.zip")
+            zip_file = get_dir("Books", f"{book_title}_完整包.zip")
             if os.path.exists(zip_file): os.remove(zip_file)
-            return f"✅ 成功删除小说: {book_title}", FileManager.get_user_books(username)
+            return f"✅ 成功删除小说: {book_title}", FileManager.get_books()
         return "❌ 找不到指定小说的文件夹", gr.update()
 
     @staticmethod
-    def _get_list(username, subdir):
-        if not username: return gr.update(choices=[], value=None)
-        d = get_user_dir(username, subdir)
+    def _get_list(subdir):
+        d = get_dir(subdir)
         items = sorted([f for f in os.listdir(d) if f.endswith('.json')]) if os.path.exists(d) else []
         return gr.update(choices=items, value=items[0] if items else None)
 
     @staticmethod
-    def _save_json_ui(username, subdir, name, data, msg):
-        if not username or not name.strip() or not data: return "❌ 数据无效", gr.update()
+    def _save_json_ui(subdir, name, data, msg):
+        if not name.strip() or not data: return "❌ 数据无效", gr.update()
         s_name = safe_name(name) + (".json" if not safe_name(name).endswith('.json') else "")
         try:
-            save_json(get_user_dir(username, subdir, s_name), data)
-            return f"✅ {msg} [{s_name}] 保存成功！", FileManager._get_list(username, subdir)
+            save_json(get_dir(subdir, s_name), data)
+            return f"✅ {msg} [{s_name}] 保存成功！", FileManager._get_list(subdir)
         except Exception as e:
             return f"❌ 保存失败: {e}", gr.update()
 
     @staticmethod
-    def _load_json_ui(username, subdir, filename, ext_key=None):
-        if not username or not filename: return gr.update(), "❌ 未选择文件"
-        fp = get_user_dir(username, subdir, filename)
+    def _load_json_ui(subdir, filename, ext_key=None):
+        if not filename: return gr.update(), "❌ 未选择文件"
+        fp = get_dir(subdir, filename)
         if not os.path.exists(fp): return gr.update(), f"❌ 找不到: {filename}"
         try:
             data = load_json(fp)
@@ -205,49 +177,49 @@ class FileManager:
 
     # Wrapper calls for UI interactions
     @staticmethod
-    def get_manual_outlines(u):
-        return FileManager._get_list(u, "outline")
+    def get_manual_outlines():
+        return FileManager._get_list("outline")
 
     @staticmethod
-    def get_user_roles(u):
-        return FileManager._get_list(u, "roles")
+    def get_roles():
+        return FileManager._get_list("roles")
 
     @staticmethod
-    def save_manual_outline(u, n, d):
-        return FileManager._save_json_ui(u, "outline", n, d, "大纲")
+    def save_manual_outline(n, d):
+        return FileManager._save_json_ui("outline", n, d, "大纲")
 
     @staticmethod
-    def load_manual_outline(u, f):
-        return FileManager._load_json_ui(u, "outline", f)
+    def load_manual_outline(f):
+        return FileManager._load_json_ui("outline", f)
 
     @staticmethod
-    def save_role_config(u, n, d):
-        return FileManager._save_json_ui(u, "roles", n, {"characters": d}, "人物设定")
+    def save_role_config(n, d):
+        return FileManager._save_json_ui("roles", n, {"characters": d}, "人物设定")
 
     @staticmethod
-    def load_role_config(u, f):
-        return FileManager._load_json_ui(u, "roles", f, "characters")
+    def load_role_config(f):
+        return FileManager._load_json_ui("roles", f, "characters")
 
 
 class EditManager:
     @staticmethod
-    def _paths(username, raw_title):
+    def _paths(raw_title):
         bt = safe_name(raw_title)
-        d = get_user_dir(username, "Books", bt)
+        d = get_dir("Books", bt)
         return os.path.join(d, f"{bt}_full_volume.txt"), os.path.join(d, f"{bt}_compressed_volume.txt")
 
     @staticmethod
-    def get_generated_chapters(username, raw_title):
-        if not username or not raw_title: return gr.update(choices=[], value=None)
-        f_file, _ = EditManager._paths(username, raw_title)
+    def get_generated_chapters(raw_title):
+        if not raw_title: return gr.update(choices=[], value=None)
+        f_file, _ = EditManager._paths(raw_title)
         chapters = sorted(list(set(f"第{m.group(1)}章" for m in re.finditer(r"第(\d+)章\n", read_file(f_file)))),
                           key=lambda x: int(re.search(r'\d+', x).group()))
         return gr.update(choices=chapters, value=chapters[-1] if chapters else None)
 
     @staticmethod
-    def load_chapter(username, raw_title, chapter_str):
-        if not username or not raw_title or not chapter_str: return "", "", "❌ 请先选择小说和章节"
-        f_file, c_file = EditManager._paths(username, raw_title)
+    def load_chapter(raw_title, chapter_str):
+        if not raw_title or not chapter_str: return "", "", "❌ 请先选择小说和章节"
+        f_file, c_file = EditManager._paths(raw_title)
         ch_num = re.search(r'\d+', chapter_str).group()
 
         t_m = re.search(rf"第{ch_num}章\n(.*?)(?=\n\n第\d+章\n|$)", read_file(f_file), re.DOTALL)
@@ -255,16 +227,15 @@ class EditManager:
         return (t_m.group(1).strip() if t_m else ""), (s_m.group(1).strip() if s_m else ""), f"✅ 成功加载 {chapter_str}"
 
     @staticmethod
-    def save_chapter(username, raw_title, chapter_str, new_content, new_summary):
-        if not username or not raw_title or not chapter_str: return "❌ 缺少必要信息"
-        f_file, c_file = EditManager._paths(username, raw_title)
+    def save_chapter(raw_title, chapter_str, new_content, new_summary):
+        if not raw_title or not chapter_str: return "❌ 缺少必要信息"
+        f_file, c_file = EditManager._paths(raw_title)
         ch_num = re.search(r'\d+', chapter_str).group()
 
         f_text, c_text = read_file(f_file), read_file(c_file)
 
         t_m = re.search(rf"(第{ch_num}章\n)(.*?)(?=\n\n第\d+章\n|$)", f_text, re.DOTALL)
         if t_m:
-            # BUG 修复: 增加换行容错，避免与后续章节内容完全贴合重叠在一起
             f_text = f_text[:t_m.start(2)] + new_content.strip() + "\n\n" + f_text[t_m.end(2):].lstrip()
         else:
             return "❌ 同步失败：正文定位失败"
@@ -277,7 +248,7 @@ class EditManager:
 
         write_file(f_file, f_text)
         write_file(c_file, c_text)
-        return f"✅ 修改已成功同步至服务器！"
+        return f"✅ 修改已成功同步至本地！"
 
 
 # ==========================================
@@ -346,17 +317,17 @@ class APIKeyManager:
 # 核心业务对象与工作流
 # ==========================================
 class AgentWorkflow:
-    def __init__(self, config, username, log_callback):
-        self.config, self.username, self.log = config, username, log_callback
+    def __init__(self, config, log_callback):
+        self.config, self.log = config, log_callback
         self.key_manager = APIKeyManager()
         self.run_event = threading.Event()
         self.run_event.set()
         self.is_running = False
 
         self.book_title = safe_name(self.config.get("book_title", "未命名小说")) or "未命名小说"
-        self.book_dir = get_user_dir(self.username, "Books", self.book_title)
+        self.book_dir = get_dir("Books", self.book_title)
         self.err_dir = os.path.join(self.book_dir, "err")
-        self.full_volume_file, self.compressed_volume_file = EditManager._paths(self.username, self.book_title)
+        self.full_volume_file, self.compressed_volume_file = EditManager._paths(self.book_title)
         self.state_file, self.role_file = os.path.join(self.book_dir, f"{self.book_title}_state.json"), os.path.join(
             self.book_dir, f"{self.book_title}_role.json")
 
@@ -421,7 +392,7 @@ class AgentWorkflow:
         is_tool = "清洗者" in role or "压缩者" in role or "归档者" in role
         a_prefix = ROLE_MAP.get(b_role, "")
 
-        mode_file = get_user_dir(self.username, "modes", self.config.get(f"{a_prefix}_mode", ""))
+        mode_file = get_dir("modes", self.config.get(f"{a_prefix}_mode", ""))
         mode_data = load_json(mode_file) if os.path.exists(mode_file) else {}
 
         sys_tpl = mode_data.get("system_prompt",
@@ -512,16 +483,12 @@ class AgentWorkflow:
         return None
 
     def _extract_score(self, text):
-        # 首先尝试精确匹配带有“分数”、“得分”等前缀的格式
         match = re.search(r'(?:分数|Score|得分)[:：]?\s*(\d{1,3})', text or "", re.IGNORECASE)
         if match:
             return int(match.group(1))
-
-        # 兼容处理：直接提取文本中最先出现的 1-3 位独立数字
         match_fallback = re.search(r'(?<!\d)(\d{1,3})(?!\d)', text or "")
         if match_fallback:
             return int(match_fallback.group(1))
-        # 找不到分数时返回 None，作为废票处理
         return None
 
     def _execute_parallel(self, limit, count, func, args_gen):
@@ -532,26 +499,18 @@ class AgentWorkflow:
         if not candidates: return None, -1, 0
         if len(candidates) == 1: return candidates[0], 100, 0
 
-        # BUG 修复：防止获取到 0 导致后续的除以0崩溃
         rev_count = max(1, int(self.config.get("reviewer_count", 1)))
 
         scores_text = self._execute_parallel(len(candidates) * rev_count, len(candidates) * rev_count, self.call_llm,
                                              lambda i: (review_prompt_tpl.format(content=candidates[i // rev_count]),
                                                         f"{reviewer_role}(方案{i // rev_count + 1}-{i % rev_count + 1})"))
 
-        # --- 修改部分：动态计算有效打分的平均值 ---
         scores = []
         for i in range(len(candidates)):
-            # 获取当前方案对应的所有评审回复
             candidate_texts = scores_text[i * rev_count:(i + 1) * rev_count]
-
-            # 提取有效分数，忽略 None (废票)
             valid_scores = [s for t in candidate_texts if (s := self._extract_score(t)) is not None]
-
-            # 如果有有效分数，则求平均；如果全员废票，则给保底 0 分，避免 len(valid_scores) 为 0 导致报错
             avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else 0
             scores.append(avg_score)
-        # ----------------------------------------
 
         best_idx = scores.index(max(scores))
 
@@ -621,7 +580,6 @@ class AgentWorkflow:
                                                                      best_chapter).strip()
 
         if self.config.get("use_archiver", False):
-            # 重构提示词，明确“温度”和“准确度”的要求
             archive_prompt = (
                 f"【当前人物设定】：\n{self.current_characters}\n\n"
                 f"【最新章节正文】：\n{final_text}\n\n"
@@ -636,7 +594,6 @@ class AgentWorkflow:
             archive_res = self.call_llm(archive_prompt, "归档者")
 
             if archive_res and "无需更新" not in archive_res:
-                # 增强正则清洗能力，防止模型依然输出多余前缀/后缀
                 clean_res = re.sub(r'^(好的|明白|没问题|以下是).*?\n', '', archive_res, flags=re.IGNORECASE).strip()
                 clean_res = clean_res.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
                 self.current_characters = clean_res
@@ -689,9 +646,6 @@ class AgentWorkflow:
         return False
 
 
-# ==========================================
-# 应用程序状态与工具函数
-# ==========================================
 class AppState:
     def __init__(self):
         self.workflow, self.thread, self.logs, self.log_text = None, None, [], ""
@@ -705,17 +659,16 @@ class AppState:
 app_state = AppState()
 
 
-def save_config_json(username, config_dict):
-    if not username: return "❌ 请先登录！"
-    save_json(get_user_dir(username, "user_input.json"), config_dict)
+def save_config_json(config_dict):
+    save_json(get_dir("user_input.json"), config_dict)
     if bt := config_dict.get("book_title", "").strip():
-        save_json(get_user_dir(username, "Books", safe_name(bt), "book_config.json"), config_dict)
+        save_json(get_dir("Books", safe_name(bt), "book_config.json"), config_dict)
     return "✅ 配置已成功保存！"
 
 
-def load_book_config(username, raw_title):
-    if not username or not raw_title: return gr.update(), gr.update(), gr.update(), "⚠️ 请输入书名"
-    conf = load_json(get_user_dir(username, "Books", safe_name(raw_title.strip()), "book_config.json"))
+def load_book_config(raw_title):
+    if not raw_title: return gr.update(), gr.update(), gr.update(), "⚠️ 请输入书名"
+    conf = load_json(get_dir("Books", safe_name(raw_title.strip()), "book_config.json"))
     if conf: return gr.update(value=conf.get("outline", "")), gr.update(value=conf.get("style", "")), gr.update(
         value=conf.get("characters", "")), f"✅ 加载《{raw_title}》配置成功"
     return gr.update(), gr.update(), gr.update(), "⚠️ 未找到专属配置"
@@ -726,7 +679,6 @@ def fetch_models(api_type, url_str, keys_str):
     api_key = keys_str.split(',')[0].strip()
     try:
         if api_type == "Gemini":
-            # 直接使用 genai SDK 获取模型列表，不需要传入冗余的 URL
             client = genai.Client(api_key=api_key)
             models = [m.name.replace('models/', '') for m in client.models.list()]
         else:
@@ -750,10 +702,11 @@ def fetch_models(api_type, url_str, keys_str):
         return gr.update(), f"❌ 获取失败:\n{e}"
 
 
-def on_user_login(username):
-    if not username: return tuple([gr.update()] * len(ALL_CONFIG_KEYS))
-    mode.init_modes(get_user_dir(username, "modes"))
-    modes, conf = get_all_modes(username), load_json(get_user_dir(username, "user_input.json"))
+def on_app_load():
+    # 初始化并加载配置
+    mode.init_modes(get_dir("modes"))
+    modes = get_all_modes()
+    conf = load_json(get_dir("user_input.json"))
 
     res = []
     for k, d_val in ALL_CONFIG_KEYS:
@@ -770,26 +723,26 @@ def build_config_dict(*args):
     return dict(zip([k[0] for k in ALL_CONFIG_KEYS], args))
 
 
-def start_generation(username, *args):
-    if not username: yield "❌ 请先登录！", gr.update(); return
+def start_generation(*args):
     config = build_config_dict(*args)
-    if not config["book_title"].strip() or not config[
-        "api_keys"].strip(): yield app_state.log_text + "\n❌ 错误: 书名和主API Key不能为空！", gr.update(); return
-    if not config["use_manual_outline"] and not config[
-        "outline"].strip(): yield app_state.log_text + "\n❌ 错误: 未启用人工大纲时，总大纲不能为空！", gr.update(); return
+    if not config["book_title"].strip() or not config["api_keys"].strip():
+        yield app_state.log_text + "\n❌ 错误: 书名和主API Key不能为空！", gr.update()
+        return
+    if not config["use_manual_outline"] and not config["outline"].strip():
+        yield app_state.log_text + "\n❌ 错误: 未启用人工大纲时，总大纲不能为空！", gr.update()
+        return
 
-    save_config_json(username, config)
+    save_config_json(config)
     if app_state.workflow and not app_state.workflow.run_event.is_set():
-        app_state.workflow.resume();
+        app_state.workflow.resume()
         app_state.log_callback("▶ 恢复生成...")
     else:
         app_state.logs = []
-        app_state.workflow = AgentWorkflow(config, username, app_state.log_callback)
+        app_state.workflow = AgentWorkflow(config, app_state.log_callback)
         app_state.thread = threading.Thread(target=app_state.workflow.run_loop, daemon=True)
         app_state.thread.start()
 
     while app_state.workflow and (app_state.workflow.is_running or app_state.thread.is_alive()):
-        # BUG 修复：不应强硬每次yield都改回"⏸ 暂停"，根据工作流的真实状态动态下发文本，避免状态闪烁跳回。
         is_paused = not app_state.workflow.run_event.is_set()
         btn_text = "▶ 继续" if is_paused else "⏸ 暂停"
         yield app_state.log_text, gr.update(value=btn_text, interactive=True)
@@ -801,146 +754,146 @@ def start_generation(username, *args):
 def toggle_pause():
     if not app_state.workflow: return "▶ 开始生成", "尚未启动工作流。"
     if app_state.workflow.run_event.is_set():
-        app_state.workflow.pause();
+        app_state.workflow.pause()
         app_state.log_callback("⏸ 暂停挂起...")
         return "▶ 继续", "已发送暂停指令"
-    app_state.workflow.resume();
+    app_state.workflow.resume()
     app_state.log_callback("▶ 恢复生成...")
     return "⏸ 暂停", "工作流已恢复"
 
 
-# ==========================================
-# Gradio WebUI 构建逻辑封装
-# ==========================================
 def build_ui():
-    with gr.Blocks(title="自闭环AI小说生成器 (WebUI 版)", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("## 📚 自闭环 AI 小说自动生成器")
-        user_state = gr.State("")
+    with gr.Blocks(title="自闭环AI小说生成器 v0.4.4 nightly test verion", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("## 📚 自闭环 AI 小说自动生成器 v0.4.4 nightly test verion")
 
-        with gr.Group(visible=True) as login_group:
-            gr.Markdown("### 🔒 请先登录或注册")
-            with gr.Row(): input_user, input_pwd = gr.Textbox(label="用户名"), gr.Textbox(label="密码", type="password")
-            with gr.Row(): btn_login, btn_register = gr.Button("🔑 登录", variant="primary"), gr.Button("📝 注册新用户")
-            auth_msg = gr.Markdown("")
+        with gr.Tabs():
+            with gr.TabItem("✍️ 剧情与设定输入"):
+                with gr.Row():
+                    book_title = gr.Textbox(label="书名 (必选)", scale=4)
+                    btn_load_book = gr.Button("📂 加载该书历史设定", scale=1)
+                load_book_msg = gr.Markdown("")
+                with gr.Row():
+                    outline = gr.Textbox(label="剧情总大纲", lines=5)
+                    btn_outline = gr.UploadButton("上传", file_types=[".txt"])
+                with gr.Row():
+                    style = gr.Textbox(label="剧情风格 (可选)", lines=3)
+                    btn_style = gr.UploadButton("上传", file_types=[".txt"])
+                with gr.Row():
+                    characters = gr.Textbox(label="人物列表 (可选)", lines=3)
+                    btn_char = gr.UploadButton("上传", file_types=[".txt"])
 
-        with gr.Group(visible=False) as main_group:
-            with gr.Row():
-                welcome_text, btn_logout = gr.Markdown(""), gr.Button("🚪 退出登录", size="sm")
-            with gr.Tabs():
-                with gr.TabItem("✍️ 用户输入 (剧情/设定)"):
-                    with gr.Row():
-                        book_title = gr.Textbox(label="书名 (必选)", scale=4)
-                        btn_load_book = gr.Button("📂 加载该书历史设定", scale=1)
-                    load_book_msg = gr.Markdown("")
-                    with gr.Row():
-                        outline = gr.Textbox(label="剧情总大纲", lines=5)
-                        btn_outline = gr.UploadButton("上传", file_types=[".txt"])
-                    with gr.Row():
-                        style = gr.Textbox(label="剧情风格 (可选)", lines=3)
-                        btn_style = gr.UploadButton("上传", file_types=[".txt"])
-                    with gr.Row():
-                        characters = gr.Textbox(label="人物列表 (可选)", lines=3)
-                        btn_char = gr.UploadButton("上传", file_types=[".txt"])
+                for btn, comp in [(btn_outline, outline), (btn_style, style), (btn_char, characters)]:
+                    btn.upload(lambda f: read_file(f.name) if f else "", inputs=[btn], outputs=[comp])
 
-                    for btn, comp in [(btn_outline, outline), (btn_style, style), (btn_char, characters)]:
-                        btn.upload(lambda f: read_file(f.name) if f else "", inputs=[btn], outputs=[comp])
+                with gr.Accordion("🎭 人物设定库 (保存与加载)", open=False):
+                    with gr.Row(): role_dropdown, btn_load_role, btn_refresh_roles = gr.Dropdown(
+                        label="设定文件"), gr.Button("📂 加载"), gr.Button("🔄 刷新")
+                    with gr.Row(): role_save_name, btn_save_role = gr.Textbox(label="设定名"), gr.Button(
+                        "💾 保存为新设定", variant="primary")
+                    role_op_msg = gr.Markdown("")
 
-                    with gr.Accordion("🎭 人物设定库 (保存与加载)", open=False):
-                        with gr.Row(): role_dropdown, btn_load_role, btn_refresh_roles = gr.Dropdown(
-                            label="设定文件"), gr.Button("📂 加载"), gr.Button("🔄 刷新")
-                        with gr.Row(): role_save_name, btn_save_role = gr.Textbox(label="设定名"), gr.Button(
-                            "💾 保存为新设定", variant="primary")
-                        role_op_msg = gr.Markdown("")
+                with gr.Accordion("📝 人工制定各章大纲模式 (可选)", open=False):
+                    use_manual_outline = gr.Checkbox(label="启用人工输入大纲")
+                    with gr.Row(): outline_dropdown, btn_load_outline, btn_refresh_outlines = gr.Dropdown(
+                        label="本地大纲"), gr.Button("📂 加载"), gr.Button("🔄 刷新")
+                    with gr.Row(): outline_save_name, btn_save_outline = gr.Textbox(label="大纲名称"), gr.Button(
+                        "💾 保存到本地", variant="primary")
+                    outline_op_msg = gr.Markdown("")
+                    manual_outline_data = gr.Dataframe(headers=["章节号", "章节名", "章节概要"],
+                                                       datatype=["number", "str", "str"], col_count=(3, "fixed"),
+                                                       row_count=(1, "dynamic"), interactive=True, type="array")
+                    btn_add_manual_row = gr.Button("➕ 新增一章大纲", size="sm")
 
-                    with gr.Accordion("📝 人工制定各章大纲模式 (可选)", open=False):
-                        use_manual_outline = gr.Checkbox(label="启用人工输入大纲")
-                        with gr.Row(): outline_dropdown, btn_load_outline, btn_refresh_outlines = gr.Dropdown(
-                            label="本地大纲"), gr.Button("📂 加载"), gr.Button("🔄 刷新")
-                        with gr.Row(): outline_save_name, btn_save_outline = gr.Textbox(label="大纲名称"), gr.Button(
-                            "💾 保存到本地", variant="primary")
-                        outline_op_msg = gr.Markdown("")
-                        manual_outline_data = gr.Dataframe(headers=["章节号", "章节名", "章节概要"],
-                                                           datatype=["number", "str", "str"], col_count=(3, "fixed"),
-                                                           row_count=(1, "dynamic"), interactive=True, type="array")
-                        btn_add_manual_row = gr.Button("➕ 新增一章大纲", size="sm")
+            with gr.TabItem("🤖 Agent 综合专属配置"):
+                agent_inputs_dict = {}
+                with gr.Accordion("➕ 新建全局模式预设", open=False):
+                    new_mode_name, new_mode_sys, new_mode_intro = gr.Textbox(label="预设名"), gr.Textbox(
+                        label="Agent人设"), gr.Textbox(label="自我介绍")
+                    new_mode_history = gr.Dataframe(headers=["用户输入", "模型回复"], datatype=["str", "str"],
+                                                    col_count=(2, "fixed"), row_count=(1, "dynamic"),
+                                                    value=[["", ""]], interactive=True)
+                    btn_add_history_row, btn_save_mode, mode_save_msg = gr.Button("➕ 新增", size="sm"), gr.Button(
+                        "💾 保存", variant="primary"), gr.Markdown("")
 
-                with gr.TabItem("🤖 Agent 综合专属配置"):
-                    agent_inputs_dict = {}
-                    with gr.Accordion("➕ 新建全局模式预设", open=False):
-                        new_mode_name, new_mode_sys, new_mode_intro = gr.Textbox(label="预设名"), gr.Textbox(
-                            label="Agent人设"), gr.Textbox(label="自我介绍")
-                        new_mode_history = gr.Dataframe(headers=["用户输入", "模型回复"], datatype=["str", "str"],
-                                                        col_count=(2, "fixed"), row_count=(1, "dynamic"),
-                                                        value=[["", ""]], interactive=True)
-                        btn_add_history_row, btn_save_mode, mode_save_msg = gr.Button("➕ 新增", size="sm"), gr.Button(
-                            "💾 保存", variant="primary"), gr.Markdown("")
+                api_status_agent = gr.Textbox(label="获取状态", interactive=False)
+                with gr.Tabs():
+                    for zh, en, _ in AGENT_NAMES_MAP:
+                        with gr.TabItem(f"{zh} ({en})"):
+                            agent_prompt = gr.Textbox(label=f"【0】{zh} 专属额外提示词", lines=2)
+                            with gr.Row(): agent_mode, agent_count = gr.Dropdown(label=f"【1】加载配置",
+                                                                                 choices=[]), gr.Number(
+                                label=f"【2】并发数", precision=0)
+                            with gr.Row(): agent_temp, agent_topp, agent_topk = gr.Slider(0.0, 2.0, step=0.1,
+                                                                                          label="Temp"), gr.Slider(
+                                0.0, 1.0, step=0.05, label="Top P"), gr.Slider(1, 100, step=1, label="Top K")
+                            gr.Markdown("### 【4】独立 API (留空默认全局)")
+                            with gr.Row():
+                                # 添加清晰的 label
+                                a_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="API 类型")
+                                a_keys = gr.Textbox(label="API Keys(逗号隔开)", type="password",
+                                                    placeholder="输入 Key...")
+                            with gr.Row():
+                                # 为 URL 和 Model 添加 label
+                                a_url = gr.Textbox(label="API URL (非Gemini必填)",
+                                                   placeholder="如https://integrate.api.nvidia.com/v1")
+                                a_model = gr.Dropdown(label="模型选择", allow_custom_value=True, interactive=True)
+                                btn_f = gr.Button("🔄 获取模型列表")
+                            btn_f.click(fetch_models, inputs=[a_type, a_url, a_keys],
+                                        outputs=[a_model, api_status_agent])
+                            agent_inputs_dict[en] = {"mode": agent_mode, "prompt": agent_prompt,
+                                                     "count": agent_count, "temp": agent_temp, "top_p": agent_topp,
+                                                     "top_k": agent_topk, "api_type": a_type, "api_keys": a_keys,
+                                                     "api_url": a_url, "api_model": a_model}
 
-                    api_status_agent = gr.Textbox(label="获取状态", interactive=False)
-                    with gr.Tabs():
-                        for zh, en, _ in AGENT_NAMES_MAP:
-                            with gr.TabItem(f"{zh} ({en})"):
-                                agent_prompt = gr.Textbox(label=f"【0】{zh} 专属额外提示词", lines=2)
-                                with gr.Row(): agent_mode, agent_count = gr.Dropdown(label=f"【1】加载配置",
-                                                                                     choices=[]), gr.Number(
-                                    label=f"【2】并发数", precision=0)
-                                with gr.Row(): agent_temp, agent_topp, agent_topk = gr.Slider(0.0, 2.0, step=0.1,
-                                                                                              label="Temp"), gr.Slider(
-                                    0.0, 1.0, step=0.05, label="Top P"), gr.Slider(1, 100, step=1, label="Top K")
-                                gr.Markdown("### 【4】独立 API (留空默认全局)")
-                                with gr.Row(): a_type, a_keys = gr.Dropdown(
-                                    ["Gemini", "OpenAI Compatible"]), gr.Textbox(type="password")
-                                with gr.Row(): a_url, a_model, btn_f = gr.Textbox(), gr.Dropdown(
-                                    allow_custom_value=True), gr.Button("🔄 获取")
-                                btn_f.click(fetch_models, inputs=[a_type, a_url, a_keys],
-                                            outputs=[a_model, api_status_agent])
-                                agent_inputs_dict[en] = {"mode": agent_mode, "prompt": agent_prompt,
-                                                         "count": agent_count, "temp": agent_temp, "top_p": agent_topp,
-                                                         "top_k": agent_topk, "api_type": a_type, "api_keys": a_keys,
-                                                         "api_url": a_url, "api_model": a_model}
+            with gr.TabItem("⚙️ 基础&全局API配置"):
+                with gr.Row():
+                    with gr.Column(scale=2): global_prompt, custom_style_prompt = gr.Textbox(
+                        label="全局提示词(可传入世界观)"), gr.Textbox(label="自定义风格")
+                    with gr.Column(scale=1):
+                        need_dev_revise, use_ai_cleaner, use_archiver = gr.Checkbox(
+                            label="开发者修改文本"), gr.Checkbox(label="AI提取正文(不建议开启)"), gr.Checkbox(
+                            label="归档者更新人物")
+                        context_max_chars = gr.Number(label="前文截取字数", precision=0)
+                api_status_main = gr.Textbox(label="全局API获取状态", interactive=False)
+                gr.Markdown("### 【主 API 配置】")
+                with gr.Row():
+                    api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="主 API 类型")
+                    api_keys = gr.Textbox(label="主 API Keys", type="password")
+                with gr.Row():
+                    api_url, api_model, btn_f_main = gr.Textbox(label="主 API URL"), gr.Dropdown(
+                        label="主模型选择", allow_custom_value=True), gr.Button("🔄 获取主模型")
+                btn_f_main.click(fetch_models, inputs=[api_type, api_url, api_keys],
+                                 outputs=[api_model, api_status_main])
 
-                with gr.TabItem("⚙️ 基础&全局API配置"):
-                    with gr.Row():
-                        with gr.Column(scale=2): global_prompt, custom_style_prompt = gr.Textbox(
-                            label="全局提示词"), gr.Textbox(label="自定义风格")
-                        with gr.Column(scale=1):
-                            need_dev_revise, use_ai_cleaner, use_archiver = gr.Checkbox(
-                                label="开发者修改文本"), gr.Checkbox(label="AI提取正文"), gr.Checkbox(
-                                label="归档者更新人物")
-                            context_max_chars = gr.Number(label="前文截取字数", precision=0)
-                    api_status_main = gr.Textbox(label="全局API获取状态", interactive=False)
-                    gr.Markdown("### 【主 API 配置】")
-                    with gr.Row(): api_type, api_keys = gr.Dropdown(["Gemini", "OpenAI Compatible"]), gr.Textbox(
-                        type="password")
-                    with gr.Row(): api_url, api_model, btn_f_main = gr.Textbox(), gr.Dropdown(
-                        allow_custom_value=True), gr.Button("🔄 获取主模型")
-                    btn_f_main.click(fetch_models, inputs=[api_type, api_url, api_keys],
-                                     outputs=[api_model, api_status_main])
-                    gr.Markdown("### 【备用 API 配置】")
-                    with gr.Row(): fallback_api_type, fallback_api_keys = gr.Dropdown(
-                        ["Gemini", "OpenAI Compatible"]), gr.Textbox(type="password")
-                    with gr.Row(): fallback_api_url, fallback_api_model, btn_f_fall = gr.Textbox(), gr.Dropdown(
-                        allow_custom_value=True), gr.Button("🔄 获取备用模型")
-                    btn_f_fall.click(fetch_models, inputs=[fallback_api_type, fallback_api_url, fallback_api_keys],
-                                     outputs=[fallback_api_model, api_status_main])
+                gr.Markdown("### 【备用 API 配置】")
+                with gr.Row():
+                    fallback_api_type, fallback_api_keys = gr.Dropdown(
+                        ["Gemini", "OpenAI Compatible"], label="备用 API 类型"), gr.Textbox(label="备用 API Keys",
+                                                                                            type="password")
+                with gr.Row():
+                    fallback_api_url, fallback_api_model, btn_f_fall = gr.Textbox(label="备用 API URL"), gr.Dropdown(
+                        label="备用模型选择", allow_custom_value=True), gr.Button("🔄 获取备用模型")
+                btn_f_fall.click(fetch_models, inputs=[fallback_api_type, fallback_api_url, fallback_api_keys],
+                                 outputs=[fallback_api_model, api_status_main])
 
-                with gr.TabItem("💻 控制台 & 日志"):
-                    with gr.Row(): btn_start, btn_pause, btn_save_conf = gr.Button("▶ 开始",
-                                                                                   variant="primary"), gr.Button(
-                        "⏸ 暂停", interactive=False), gr.Button("💾 保存配置")
-                    sys_msg, log_output = gr.Textbox(label="系统提示"), gr.Textbox(label="运行日志", lines=25,
-                                                                                   max_lines=25)
+            with gr.TabItem("💻 控制台 & 日志"):
+                with gr.Row(): btn_start, btn_pause, btn_save_conf = gr.Button("▶ 开始",
+                                                                               variant="primary"), gr.Button(
+                    "⏸ 暂停", interactive=False), gr.Button("💾 保存配置")
+                sys_msg, log_output = gr.Textbox(label="系统提示"), gr.Textbox(label="运行日志", lines=25,
+                                                                               max_lines=25)
 
-                with gr.TabItem("📁 文件与章节管理"):
-                    btn_refresh, book_select = gr.Button("🔄 刷新"), gr.Dropdown(label="小说")
-                    with gr.Row(): btn_download, btn_delete = gr.Button("📦 下载", variant="primary"), gr.Button(
-                        "🗑️ 删除", variant="stop")
-                    fm_msg, fm_file = gr.Textbox(label="状态"), gr.File(label="下载", visible=False)
-                    gr.Markdown("--- \n ### 📝 服务器章节内容覆写")
-                    with gr.Row(): edit_chapter_select, btn_load_ch = gr.Dropdown(label="章节"), gr.Button("📂 获取")
-                    edit_status = gr.Markdown("")
-                    with gr.Row(): edit_ch_cont, edit_ch_sum = gr.Textbox(label="正文", lines=10), gr.Textbox(
-                        label="摘要", lines=10)
-                    btn_save_ch = gr.Button("💾 保存修改并同步", variant="primary")
+            with gr.TabItem("📁 文件与章节管理"):
+                btn_refresh, book_select = gr.Button("🔄 刷新"), gr.Dropdown(label="小说")
+                with gr.Row(): btn_download, btn_delete = gr.Button("📦 下载", variant="primary"), gr.Button(
+                    "🗑️ 删除", variant="stop")
+                fm_msg, fm_file = gr.Textbox(label="状态"), gr.File(label="下载", visible=False)
+                gr.Markdown("--- \n ### 📝 本地章节内容覆写")
+                with gr.Row(): edit_chapter_select, btn_load_ch = gr.Dropdown(label="章节"), gr.Button("📂 获取")
+                edit_status = gr.Markdown("")
+                with gr.Row(): edit_ch_cont, edit_ch_sum = gr.Textbox(label="正文", lines=10), gr.Textbox(
+                    label="摘要", lines=10)
+                btn_save_ch = gr.Button("💾 保存修改并同步", variant="primary")
 
         # ==========================================
         # 严格收集 Inputs
@@ -958,59 +911,58 @@ def build_ui():
         all_inputs = base_inputs + agent_inputs_list
 
         # ==========================================
-        # 事件绑定
+        # 事件绑定与初始化加载
         # ==========================================
+        # 页面初始化加载数据
+        demo.load(on_app_load, inputs=[], outputs=all_inputs)
+        demo.load(FileManager.get_books, inputs=[], outputs=[book_select])
+        demo.load(FileManager.get_manual_outlines, inputs=[], outputs=[outline_dropdown])
+        demo.load(FileManager.get_roles, inputs=[], outputs=[role_dropdown])
+
         btn_add_manual_row.click(lambda df: df + [[len(df) + 1, "", ""]] if df else [[1, "", ""]],
                                  inputs=[manual_outline_data], outputs=[manual_outline_data])
         btn_add_history_row.click(lambda df: df + [["", ""]] if df else [["", ""]], inputs=[new_mode_history],
                                   outputs=[new_mode_history])
 
-        btn_load_book.click(load_book_config, inputs=[user_state, book_title],
+        btn_load_book.click(load_book_config, inputs=[book_title],
                             outputs=[outline, style, characters, load_book_msg])
         btn_save_mode.click(ModeManager.save_mode,
-                            inputs=[user_state, new_mode_name, new_mode_sys, new_mode_intro, new_mode_history],
+                            inputs=[new_mode_name, new_mode_sys, new_mode_intro, new_mode_history],
                             outputs=[mode_save_msg] + [agent_inputs_dict[en]["mode"] for _, en, _ in AGENT_NAMES_MAP])
-        btn_save_conf.click(lambda u, *args: save_config_json(u, build_config_dict(*args)),
-                            inputs=[user_state] + all_inputs, outputs=[sys_msg])
-
-        login_ev = btn_login.click(UserManager.login, inputs=[input_user, input_pwd],
-                                   outputs=[auth_msg, user_state, login_group, main_group, welcome_text])
-        login_ev.then(FileManager.get_user_books, inputs=[user_state], outputs=[book_select])
-        login_ev.then(on_user_login, inputs=[user_state], outputs=all_inputs)
-        login_ev.then(FileManager.get_manual_outlines, inputs=[user_state], outputs=[outline_dropdown])
-        login_ev.then(FileManager.get_user_roles, inputs=[user_state], outputs=[role_dropdown])
-
-        btn_register.click(UserManager.register, inputs=[input_user, input_pwd], outputs=[auth_msg])
-        btn_logout.click(UserManager.logout, inputs=[],
-                         outputs=[user_state, auth_msg, login_group, main_group, welcome_text])
+        btn_save_conf.click(lambda *args: save_config_json(build_config_dict(*args)),
+                            inputs=all_inputs, outputs=[sys_msg])
 
         btn_save_outline.click(FileManager.save_manual_outline,
-                               inputs=[user_state, outline_save_name, manual_outline_data],
+                               inputs=[outline_save_name, manual_outline_data],
                                outputs=[outline_op_msg, outline_dropdown])
-        btn_load_outline.click(FileManager.load_manual_outline, inputs=[user_state, outline_dropdown],
+        btn_load_outline.click(FileManager.load_manual_outline, inputs=[outline_dropdown],
                                outputs=[manual_outline_data, outline_op_msg])
-        btn_refresh_outlines.click(FileManager.get_manual_outlines, inputs=[user_state], outputs=[outline_dropdown])
+        btn_refresh_outlines.click(FileManager.get_manual_outlines, inputs=[], outputs=[outline_dropdown])
 
-        btn_save_role.click(FileManager.save_role_config, inputs=[user_state, role_save_name, characters],
+        btn_save_role.click(FileManager.save_role_config, inputs=[role_save_name, characters],
                             outputs=[role_op_msg, role_dropdown])
-        btn_load_role.click(FileManager.load_role_config, inputs=[user_state, role_dropdown],
+        btn_load_role.click(FileManager.load_role_config, inputs=[role_dropdown],
                             outputs=[characters, role_op_msg])
-        btn_refresh_roles.click(FileManager.get_user_roles, inputs=[user_state], outputs=[role_dropdown])
+        btn_refresh_roles.click(FileManager.get_roles, inputs=[], outputs=[role_dropdown])
 
-        btn_start.click(start_generation, inputs=[user_state] + all_inputs, outputs=[log_output, btn_pause])
+        btn_start.click(start_generation, inputs=all_inputs, outputs=[log_output, btn_pause])
         btn_pause.click(toggle_pause, inputs=[], outputs=[btn_pause, sys_msg])
 
-        btn_refresh.click(FileManager.get_user_books, inputs=[user_state], outputs=[book_select])
-        btn_download.click(FileManager.export_book_folder, inputs=[user_state, book_select], outputs=[fm_file, fm_msg])
-        btn_delete.click(FileManager.delete_user_book, inputs=[user_state, book_select], outputs=[fm_msg, book_select])
+        btn_refresh.click(FileManager.get_books, inputs=[], outputs=[book_select])
+        btn_download.click(FileManager.export_book_folder, inputs=[book_select], outputs=[fm_file, fm_msg])
+        btn_delete.click(FileManager.delete_book, inputs=[book_select], outputs=[fm_msg, book_select])
 
-        book_select.change(EditManager.get_generated_chapters, inputs=[user_state, book_select],
+        book_select.change(EditManager.get_generated_chapters, inputs=[book_select],
                            outputs=[edit_chapter_select])
-        btn_load_ch.click(EditManager.load_chapter, inputs=[user_state, book_select, edit_chapter_select],
+        btn_load_ch.click(EditManager.load_chapter, inputs=[book_select, edit_chapter_select],
                           outputs=[edit_ch_cont, edit_ch_sum, edit_status])
         btn_save_ch.click(EditManager.save_chapter,
-                          inputs=[user_state, book_select, edit_chapter_select, edit_ch_cont, edit_ch_sum],
+                          inputs=[book_select, edit_chapter_select, edit_ch_cont, edit_ch_sum],
                           outputs=[edit_status])
+        demo.load(None, inputs=None, outputs=None,
+                  js='''() => { alert("温馨提示：这是一个内测版本，功能尚在完善中。有问题请发送邮件至e1351599@u.nus.edu"); }''')
+        demo.load(on_app_load, inputs=[], outputs=all_inputs)
+        demo.load(FileManager.get_books, inputs=[], outputs=[book_select])
 
     return demo
 
