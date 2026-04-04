@@ -42,8 +42,12 @@ BASE_CONFIG_KEYS = [
 
 AGENT_CONFIG_KEYS = []
 for _, en, d_val in AGENT_NAMES_MAP:
+    use_hist_default = True if en in ["designer", "developer"] else False
+    ctx_count_default = 20 if en == "developer" else 0
+
     AGENT_CONFIG_KEYS.extend([
         (f"{en}_mode", d_val), (f"{en}_prompt", ""), (f"{en}_count", 1),
+        (f"{en}_use_history", use_hist_default), (f"{en}_full_ctx_count", ctx_count_default),
         (f"{en}_temperature", 0.9 if en != "designer" else 0.7),
         (f"{en}_top_p", 0.9), (f"{en}_top_k", 40),
         (f"{en}_api_type", "Gemini"), (f"{en}_api_keys", ""), (f"{en}_api_url", ""),
@@ -115,6 +119,73 @@ class ModeManager:
 
         modes = get_all_modes()
         return f"✅ 预设 [{name}] 保存成功！", *[gr.update(choices=modes) for _ in range(len(AGENT_NAMES_MAP))]
+
+
+class VolumeManager:
+    @staticmethod
+    def get_chapter_dir(book_title):
+        return get_dir("Books", safe_name(book_title), "chapters")
+
+    @staticmethod
+    def get_summary_dir(book_title):
+        return get_dir("Books", safe_name(book_title), "summaries")
+
+    @staticmethod
+    def ensure_directories_and_migrate(book_title):
+        ch_dir = VolumeManager.get_chapter_dir(book_title)
+        sum_dir = VolumeManager.get_summary_dir(book_title)
+
+        if not os.path.exists(ch_dir): os.makedirs(ch_dir, exist_ok=True)
+        if not os.path.exists(sum_dir): os.makedirs(sum_dir, exist_ok=True)
+
+        # 兼容旧版本：如果文件夹为空，则从老的完整卷里提取分离出来
+        if not os.listdir(ch_dir):
+            full_file = get_dir("Books", safe_name(book_title), f"{safe_name(book_title)}_full_volume.txt")
+            if os.path.exists(full_file):
+                text = read_file(full_file)
+                for m in re.finditer(r"第(\d+)章\n(.*?)(?=\n\n第\d+章\n|$)", text, re.DOTALL):
+                    write_file(os.path.join(ch_dir, f"{m.group(1)}.txt"), m.group(2).strip())
+
+        if not os.listdir(sum_dir):
+            comp_file = get_dir("Books", safe_name(book_title), f"{safe_name(book_title)}_compressed_volume.txt")
+            if os.path.exists(comp_file):
+                text = read_file(comp_file)
+                for m in re.finditer(r"第(\d+)章剧情：(.*?)(?=\n第\d+章剧情：|$)", text, re.DOTALL):
+                    write_file(os.path.join(sum_dir, f"{m.group(1)}.txt"), m.group(2).strip())
+
+    @staticmethod
+    def rebuild_full(book_title):
+        d = VolumeManager.get_chapter_dir(book_title)
+        full_file = get_dir("Books", safe_name(book_title), f"{safe_name(book_title)}_full_volume.txt")
+        content = []
+        if os.path.exists(d):
+            files = [f for f in os.listdir(d) if f.endswith('.txt') and f[:-4].isdigit()]
+            files.sort(key=lambda x: int(x[:-4]))
+            for f in files:
+                ch_num = f[:-4]
+                text = read_file(os.path.join(d, f))
+                content.append(f"第{ch_num}章\n{text}")
+
+        final_text = "\n\n".join(content)
+        write_file(full_file, final_text)
+        return final_text
+
+    @staticmethod
+    def rebuild_compressed(book_title):
+        d = VolumeManager.get_summary_dir(book_title)
+        comp_file = get_dir("Books", safe_name(book_title), f"{safe_name(book_title)}_compressed_volume.txt")
+        content = []
+        if os.path.exists(d):
+            files = [f for f in os.listdir(d) if f.endswith('.txt') and f[:-4].isdigit()]
+            files.sort(key=lambda x: int(x[:-4]))
+            for f in files:
+                ch_num = f[:-4]
+                text = read_file(os.path.join(d, f))
+                content.append(f"第{ch_num}章剧情：{text}")
+
+        final_text = "\n".join(content)
+        write_file(comp_file, final_text)
+        return final_text
 
 
 class FileManager:
@@ -201,54 +272,172 @@ class FileManager:
         return FileManager._load_json_ui("roles", f, "characters")
 
 
-class EditManager:
+class ImportManager:
     @staticmethod
-    def _paths(raw_title):
-        bt = safe_name(raw_title)
-        d = get_dir("Books", bt)
-        return os.path.join(d, f"{bt}_full_volume.txt"), os.path.join(d, f"{bt}_compressed_volume.txt")
+    def import_novel(file_obj, raw_title, protagonist_name, *config_args):
+        """导入本地小说、切片并强制按序重排，最后自动压缩摘要"""
+        if not file_obj or not raw_title.strip():
+            yield "❌ 缺少上传的文件或目标书名"
+            return
 
+        book_title = safe_name(raw_title)
+        book_dir = get_dir("Books", book_title)
+        os.makedirs(book_dir, exist_ok=True)
+
+        # 初始化目录
+        VolumeManager.ensure_directories_and_migrate(book_title)
+        ch_dir = VolumeManager.get_chapter_dir(book_title)
+        sum_dir = VolumeManager.get_summary_dir(book_title)
+
+        try:
+            text = read_file(file_obj.name)
+        except Exception as e:
+            yield f"❌ 读取文件失败: {e}"
+            return
+
+        yield f"✅ 文件读取成功，正在智能检测并切片..."
+
+        # 兼容性极强的正则表达式匹配类似 "第x章", "第一章", "第一百回" 等标识
+        # 利用非捕获组 (?:...) 自动忽略并丢弃开头的 "第一卷" 这样的分卷前缀，实现无视分卷直接切片
+        pattern = re.compile(
+            r"^\s*(?:第[0-9一二三四五六七八九十百千万零〇]+卷\s*)?(第[0-9一二三四五六七八九十百千万零〇]+[章节回].*?)$",
+            re.MULTILINE)
+        parts = pattern.split(text)
+
+        chapters = []
+        if len(parts) == 1:
+            # 未检测到任何章节，作为第一章
+            chapters.append(parts[0].strip())
+        else:
+            for i in range(1, len(parts), 2):
+                ch_title = parts[i].strip()
+                ch_content = parts[i + 1].strip() if i + 1 < len(parts) else ""
+
+                # 剔除原有文本中的章号前缀 (如 "第3章 " 会被剔除)，防止重连时出现双重编号
+                ch_title_clean = re.sub(r"^第[0-9一二三四五六七八九十百千万零〇]+[章节回]\s*", "", ch_title).strip()
+                if ch_title_clean:
+                    ch_content = f"【{ch_title_clean}】\n{ch_content}"
+
+                chapters.append(ch_content)
+
+        # 如果切片后第一章之前有内容（例如楔子、前言），拼接进真正的第一章里
+        if len(parts) > 1 and parts[0].strip():
+            if not chapters:
+                chapters.append(parts[0].strip())
+            else:
+                chapters[0] = parts[0].strip() + "\n\n" + chapters[0]
+
+        total_chapters = len(chapters)
+        if total_chapters == 0:
+            yield "❌ 提取到的章节数为0，请检查文件编码或内容。"
+            return
+
+        yield f"✅ 成功提取并切分为 {total_chapters} 章，正在本地强制按序编号并保存..."
+
+        for idx, content in enumerate(chapters):
+            ch_num = idx + 1
+            write_file(os.path.join(ch_dir, f"{ch_num}.txt"), content)
+
+        VolumeManager.rebuild_full(book_title)
+        save_json(os.path.join(book_dir, f"{book_title}_state.json"), {"completed_chapters": total_chapters})
+
+        yield f"✅ 章节拆分保存完成！准备调用压缩者补充摘要（共 {total_chapters} 章，耗时较长，请耐心等待）..."
+
+        # 开始压缩所有提取出来的章节
+        config = build_config_dict(*config_args)
+
+        logs = []
+
+        def log_cb(msg):
+            logs.append(msg)
+
+        workflow = AgentWorkflow(config, log_cb)
+        workflow.is_running = True
+
+        for idx, content in enumerate(chapters):
+            ch_num = idx + 1
+
+            # 动态更新 workflow 的内部状态，以便 _build_dynamic_history 能够获取正确的前文进行联系
+            workflow.current_chapter = ch_num
+            workflow.chapter_texts[ch_num] = content
+
+            yield f"🔄 正在智能压缩第 {ch_num}/{total_chapters} 章...\n{logs[-1] if logs else ''}"
+            try:
+                summary = workflow.compress_text(content, pass_history=True, protagonist_name=protagonist_name)
+                if not summary:
+                    summary = "【警告】AI 压缩失败或返回为空，请后续在此页面手动修正并覆盖。"
+            except Exception as e:
+                summary = f"【错误】压缩过程异常: {e}"
+
+            # 将生成的摘要塞进 workflow 缓存，供下一章压缩时作为历史上下文参考
+            workflow.summary_texts[ch_num] = summary
+            write_file(os.path.join(sum_dir, f"{ch_num}.txt"), summary)
+
+        VolumeManager.rebuild_compressed(book_title)
+
+        yield f"🎉 导入全部处理完成！小说已完全切片并由AI接管进度（共处理 {total_chapters} 章）。\n请在当前【文件与章节管理】下拉菜单中刷新并选取查看！"
+
+
+class EditManager:
     @staticmethod
     def get_generated_chapters(raw_title):
         if not raw_title: return gr.update(choices=[], value=None)
-        f_file, _ = EditManager._paths(raw_title)
-        chapters = sorted(list(set(f"第{m.group(1)}章" for m in re.finditer(r"第(\d+)章\n", read_file(f_file)))),
-                          key=lambda x: int(re.search(r'\d+', x).group()))
-        return gr.update(choices=chapters, value=chapters[-1] if chapters else None)
+        VolumeManager.ensure_directories_and_migrate(raw_title)
+        ch_dir = VolumeManager.get_chapter_dir(raw_title)
+        if os.path.exists(ch_dir):
+            files = [int(f[:-4]) for f in os.listdir(ch_dir) if f.endswith('.txt') and f[:-4].isdigit()]
+            chapters = [f"第{c}章" for c in sorted(files)]
+            return gr.update(choices=chapters, value=chapters[-1] if chapters else None)
+        return gr.update(choices=[], value=None)
 
     @staticmethod
     def load_chapter(raw_title, chapter_str):
         if not raw_title or not chapter_str: return "", "", "❌ 请先选择小说和章节"
-        f_file, c_file = EditManager._paths(raw_title)
+        VolumeManager.ensure_directories_and_migrate(raw_title)
         ch_num = re.search(r'\d+', chapter_str).group()
-
-        t_m = re.search(rf"第{ch_num}章\n(.*?)(?=\n\n第\d+章\n|$)", read_file(f_file), re.DOTALL)
-        s_m = re.search(rf"第{ch_num}卷剧情：(.*?)(?=\n第\d+卷剧情：|$)", read_file(c_file), re.DOTALL)
-        return (t_m.group(1).strip() if t_m else ""), (s_m.group(1).strip() if s_m else ""), f"✅ 成功加载 {chapter_str}"
+        ch_file = os.path.join(VolumeManager.get_chapter_dir(raw_title), f"{ch_num}.txt")
+        sum_file = os.path.join(VolumeManager.get_summary_dir(raw_title), f"{ch_num}.txt")
+        return read_file(ch_file), read_file(sum_file), f"✅ 成功加载 {chapter_str}"
 
     @staticmethod
-    def save_chapter(raw_title, chapter_str, new_content, new_summary):
-        if not raw_title or not chapter_str: return "❌ 缺少必要信息"
-        f_file, c_file = EditManager._paths(raw_title)
+    def save_chapter(raw_title, chapter_str, new_content, *config_args):
+        if not raw_title or not chapter_str: return gr.update(), "❌ 缺少必要信息"
+
         ch_num = re.search(r'\d+', chapter_str).group()
 
-        f_text, c_text = read_file(f_file), read_file(c_file)
+        # 1. 覆盖单章文本
+        ch_file = os.path.join(VolumeManager.get_chapter_dir(raw_title), f"{ch_num}.txt")
+        write_file(ch_file, new_content.strip())
 
-        t_m = re.search(rf"(第{ch_num}章\n)(.*?)(?=\n\n第\d+章\n|$)", f_text, re.DOTALL)
-        if t_m:
-            f_text = f_text[:t_m.start(2)] + new_content.strip() + "\n\n" + f_text[t_m.end(2):].lstrip()
-        else:
-            return "❌ 同步失败：正文定位失败"
+        # 2. 重新连接最新的完整卷
+        VolumeManager.rebuild_full(raw_title)
 
-        s_m = re.search(rf"(第{ch_num}卷剧情：)(.*?)(?=\n第\d+卷剧情：|$)", c_text, re.DOTALL)
-        if s_m:
-            c_text = c_text[:s_m.start(2)] + new_summary.strip() + "\n" + c_text[s_m.end(2):].lstrip()
-        else:
-            return "❌ 同步失败：摘要定位失败"
+        try:
+            # 3. 实例化工作流以调用压缩者
+            config = build_config_dict(*config_args)
+            workflow = AgentWorkflow(config, lambda msg: print(msg))
+            workflow.is_running = True
 
-        write_file(f_file, f_text)
-        write_file(c_file, c_text)
-        return f"✅ 修改已成功同步至本地！"
+            # 4. 压缩者重新压缩这一章节
+            final_sum = workflow.compress_text(new_content)
+
+            if final_sum:
+                # 5. 保存独立摘要文件
+                sum_file = os.path.join(VolumeManager.get_summary_dir(raw_title), f"{ch_num}.txt")
+                write_file(sum_file, final_sum)
+                # 6. 重新连接最新的压缩卷
+                VolumeManager.rebuild_compressed(raw_title)
+
+                # 7. 更新当前内存运行中的工作流字典状态
+                if app_state.workflow:
+                    app_state.workflow.chapter_texts[int(ch_num)] = new_content.strip()
+                    app_state.workflow.summary_texts[int(ch_num)] = final_sum
+
+                return final_sum, f"✅ 修改已保存，完整卷已更新，且 AI 压缩者已重新生成摘要并重连至最新压缩卷！"
+            else:
+                return gr.update(), f"⚠️ 章节修改成功且完整卷已更新，但 AI 压缩者发生异常，请检查配置或重试。"
+        except Exception as e:
+            return gr.update(), f"❌ 修改成功，但后台压缩环节出现错误: {e}"
 
 
 # ==========================================
@@ -273,7 +462,7 @@ class LLMService:
         if history_text and history_text.strip():
             contents.extend([types.Content(role="user", parts=[types.Part.from_text(text="回顾一下之前的剧情。")]),
                              types.Content(role="model", parts=[
-                                 types.Part.from_text(text=f"下面是我之前已经完成的剧情摘要：\n{history_text}")])])
+                                 types.Part.from_text(text=f"下面是我之前已经完成的剧情：\n{history_text}")])])
         contents.append(types.Content(role="user", parts=[types.Part.from_text(text=final_prompt)]))
 
         res = client.models.generate_content(model=model_name, contents=contents, config=config)
@@ -292,7 +481,7 @@ class LLMService:
             [{"role": "user", "content": t["user"]}, {"role": "assistant", "content": t["model"]}])
         if history_text and history_text.strip():
             msgs.extend([{"role": "user", "content": "之前写了哪些剧情？"},
-                         {"role": "assistant", "content": f"以下是我之前已经完成的剧情摘要：\n{history_text}"}])
+                         {"role": "assistant", "content": f"以下是我之前已经完成的剧情：\n{history_text}"}])
         msgs.append({"role": "user", "content": final_prompt})
         return \
             client.chat.completions.create(model=model_name, messages=msgs, temperature=temperature,
@@ -327,17 +516,36 @@ class AgentWorkflow:
         self.book_title = safe_name(self.config.get("book_title", "未命名小说")) or "未命名小说"
         self.book_dir = get_dir("Books", self.book_title)
         self.err_dir = os.path.join(self.book_dir, "err")
-        self.full_volume_file, self.compressed_volume_file = EditManager._paths(self.book_title)
-        self.state_file, self.role_file = os.path.join(self.book_dir, f"{self.book_title}_state.json"), os.path.join(
-            self.book_dir, f"{self.book_title}_role.json")
 
-        self.full_volume = read_file(self.full_volume_file)
-        self.compressed_volume = read_file(self.compressed_volume_file)
+        # 兼容处理并初始化所需文件夹结构
+        VolumeManager.ensure_directories_and_migrate(self.book_title)
+
+        self.full_volume_file = get_dir("Books", self.book_title, f"{self.book_title}_full_volume.txt")
+        self.compressed_volume_file = get_dir("Books", self.book_title, f"{self.book_title}_compressed_volume.txt")
+        self.state_file = os.path.join(self.book_dir, f"{self.book_title}_state.json")
+        self.role_file = os.path.join(self.book_dir, f"{self.book_title}_role.json")
+
+        self.full_volume = VolumeManager.rebuild_full(self.book_title)
+        self.compressed_volume = VolumeManager.rebuild_compressed(self.book_title)
 
         state_data = load_json(self.state_file)
         self.current_chapter = state_data.get("completed_chapters", 0) + 1
-        self.chapter_texts = {int(m.group(1)): m.group(2).strip() for m in
-                              re.finditer(r"第(\d+)章\n(.*?)(?=\n\n第\d+章\n|$)", self.full_volume, re.DOTALL)}
+
+        # 读取各个独立章节正文的缓存
+        self.chapter_texts = {}
+        ch_dir = VolumeManager.get_chapter_dir(self.book_title)
+        if os.path.exists(ch_dir):
+            for f in os.listdir(ch_dir):
+                if f.endswith('.txt') and f[:-4].isdigit():
+                    self.chapter_texts[int(f[:-4])] = read_file(os.path.join(ch_dir, f))
+
+        # 读取各个独立摘要的缓存
+        self.summary_texts = {}
+        sum_dir = VolumeManager.get_summary_dir(self.book_title)
+        if os.path.exists(sum_dir):
+            for f in os.listdir(sum_dir):
+                if f.endswith('.txt') and f[:-4].isdigit():
+                    self.summary_texts[int(f[:-4])] = read_file(os.path.join(sum_dir, f))
 
         self.current_characters = load_json(self.role_file).get("characters", self.config.get("characters", "").strip())
         if not os.path.exists(self.role_file) and self.current_characters: save_json(self.role_file, {
@@ -352,9 +560,49 @@ class AgentWorkflow:
                 self.max_manual_chapter = max(self.manual_dict.keys())
                 self.log(f"✅ 人工大纲加载成功，目标完结章：第 {self.max_manual_chapter} 章")
 
+    def _build_dynamic_history(self, full_count):
+        """
+        根据指定的完整章数构建动态历史记录：
+        如果 full_count 为 20，当前是第61章：
+        会精确截取 41~60 章为完整内容，剩余前面的 1~40 章为摘要。
+        """
+        # 1. 确定完整内容截取的起始位置
+        actual_full = min(full_count, self.current_chapter - 1)
+        actual_full = max(0, actual_full)
+        start_full = self.current_chapter - actual_full
+
+        history_parts = []
+
+        # 1. 前文摘要部分 (1 ~ start_full - 1)
+        summary_parts = []
+        for i in range(1, start_full):
+            if i in self.summary_texts:
+                summary_parts.append(f"第{i}章剧情：{self.summary_texts[i]}")
+        if summary_parts:
+            history_parts.append("【前文剧情摘要】\n" + "\n".join(summary_parts))
+
+        # 2. 前文完整章节部分 (start_full ~ current_chapter - 1)
+        full_parts = []
+        for i in range(start_full, self.current_chapter):
+            if i in self.chapter_texts:
+                full_parts.append(f"第{i}章\n{self.chapter_texts[i]}")
+        if full_parts:
+            history_parts.append("【前文完整剧情内容】\n" + "\n\n".join(full_parts))
+
+        full_history = "\n\n".join(history_parts)
+
+        # 进行最大字符数安全截断 (避免 Token 超限)
+        max_chars = int(self.config.get("context_max_chars", 50000))
+        if len(full_history) > max_chars:
+            full_history = full_history[-max_chars:]
+            match = re.search(r'[。！？\n]', full_history)
+            if match:
+                full_history = full_history[match.end():].strip()
+
+        return full_history
+
     def save_local_data(self):
-        write_file(self.full_volume_file, self.full_volume)
-        write_file(self.compressed_volume_file, self.compressed_volume)
+        # 注意不再在这里覆盖大文件，大文件通过 VolumeManager 的拼装生成
         save_json(self.state_file, {"completed_chapters": self.current_chapter})
 
     def _save_error_log(self, role, conf, sys_inst, is_tool, model_intro, pre_history, final_prompt, history_text,
@@ -501,9 +749,18 @@ class AgentWorkflow:
 
         rev_count = max(1, int(self.config.get("reviewer_count", 1)))
 
+        # 根据实际请求评审的角色获取基础英文字段前缀，进而判断读取前文配置
+        b_role = reviewer_role.split()[0].split('(')[0]
+        en_role = ROLE_MAP.get(b_role, "reviewer")
+
+        use_hist = self.config.get(f"{en_role}_use_history", False)
+        ctx_count = int(self.config.get(f"{en_role}_full_ctx_count", 0))
+        dynamic_history = self._build_dynamic_history(ctx_count) if use_hist else ""
+
         scores_text = self._execute_parallel(len(candidates) * rev_count, len(candidates) * rev_count, self.call_llm,
                                              lambda i: (review_prompt_tpl.format(content=candidates[i // rev_count]),
-                                                        f"{reviewer_role}(方案{i // rev_count + 1}-{i % rev_count + 1})"))
+                                                        f"{reviewer_role}(方案{i // rev_count + 1}-{i % rev_count + 1})",
+                                                        False, dynamic_history))
 
         scores = []
         for i in range(len(candidates)):
@@ -535,10 +792,16 @@ class AgentWorkflow:
             return True
 
         self.log(f"\n--- 步骤 1: 设计者制定当前章开发计划 (第 {self.current_chapter} 章) ---")
+
+        # 设计者按自身独立配置读取上下文
+        use_hist = self.config.get("designer_use_history", True)
+        ctx_count = int(self.config.get("designer_full_ctx_count", 0))
+        dynamic_history = self._build_dynamic_history(ctx_count) if use_hist else ""
+
         plans = self._execute_parallel(int(self.config.get("designer_count", 1)),
                                        int(self.config.get("designer_count", 1)), self.call_llm, lambda i: (
                 f"以下是虚拟创作。大纲：{self.config.get('outline', '')}。风格：{self.config.get('style', '')}。人物：{self.current_characters}。\n任务：**仅为当前第{self.current_chapter}章**制定简短精炼发展计划（<300字），列出3-4个核心节点，结尾留悬念。",
-                f"设计者 {i + 1}", False, self.compressed_volume))
+                f"设计者 {i + 1}", False, dynamic_history))
         if not plans or not self.is_running: return False
 
         self.best_plan, _, _ = self._evaluate_candidates(plans, "打分(0-100)，输出'分数: X'\n计划：{content}",
@@ -547,17 +810,17 @@ class AgentWorkflow:
 
     def _step_develop_phase(self):
         self.log("\n--- 步骤 3 & 4: 开发者并发编写章节 ---")
-        max_chars = int(self.config.get("context_max_chars", 50000))
-        recent_text = ""
-        if self.full_volume.strip():
-            tail = self.full_volume[-max_chars:]
-            match = re.search(r'[。！？\n]', tail)
-            recent_text = tail[match.end():].strip() if match else tail.strip()
+
+        # 开发者按自身独立配置读取上下文
+        use_hist = self.config.get("developer_use_history", True)
+        ctx_count = int(self.config.get("developer_full_ctx_count", 20))
+        dynamic_history = self._build_dynamic_history(ctx_count) if use_hist else ""
 
         dev_args = lambda i: (
-            f"虚拟创作。根据计划编写第{self.current_chapter}章正文(>2000字)，包裹在 <text> 和 </text> 内！\n计划：{self.best_plan}\n" + (
-                f"\n参考前情：\n{recent_text}\n" if recent_text else ""), f"开发者 {i + 1}", False,
-            self.compressed_volume)
+            f"虚拟创作。根据计划编写第{self.current_chapter}章正文(>2000字)，包裹在 <text> 和 </text> 内！\n"
+            f"**注意：只输出小说正文内容，开头绝对不要包含“第{self.current_chapter}章”等标题！**\n"
+            f"计划：{self.best_plan}\n", f"开发者 {i + 1}", False, dynamic_history)
+
         chapters = self._execute_parallel(int(self.config.get("developer_count", 1)),
                                           int(self.config.get("developer_count", 1)), self.call_llm, dev_args)
         if not chapters or not self.is_running: return False
@@ -566,20 +829,49 @@ class AgentWorkflow:
         best_chapter, _, best_idx = self._evaluate_candidates(chapters, review_prompt, "评审者(打分)")
 
         if self.config.get("need_dev_revise", False):
-            feedback = self.call_llm(f"请对比【本章计划】，指出【正文】中未完成的情节或需要修改的瑕疵(勿夸奖，务必严厉)。\n【本章计划】：{self.best_plan}\n\n【正文】：{best_chapter}", "评审者(检视)")
-            if self._extract_score(self.call_llm(f"评估意见是否合理，打分(0-100)\n{feedback}", "裁判者")) >= 80:
+            # 独立提取针对重修评审者的上下文设定
+            rev_use = self.config.get("reviewer_use_history", False)
+            rev_ctx = int(self.config.get("reviewer_full_ctx_count", 0))
+            rev_hist = self._build_dynamic_history(rev_ctx) if rev_use else ""
+
+            feedback = self.call_llm(
+                f"请对比【本章计划】，指出【正文】中未完成的情节或需要修改的瑕疵(勿夸奖，务必严厉)。\n【本章计划】：{self.best_plan}\n\n【正文】：{best_chapter}",
+                "评审者(检视)", False, rev_hist)
+
+            # 独立提取裁判者的上下文设定
+            judge_use = self.config.get("judge_use_history", False)
+            judge_ctx = int(self.config.get("judge_full_ctx_count", 0))
+            judge_hist = self._build_dynamic_history(judge_ctx) if judge_use else ""
+
+            score_text = self.call_llm(f"评估意见是否合理，打分(0-100)\n{feedback}", "裁判者", False, judge_hist)
+
+            if self._extract_score(score_text) >= 80:
                 best_chapter = self.call_llm(f"根据意见重修章节，包裹在 <text> 内！\n原：{best_chapter}\n意见：{feedback}",
-                                             f"开发者 {best_idx + 1}")
+                                             f"开发者 {best_idx + 1}", False, dynamic_history)
 
         if self.config.get("use_ai_cleaner", False):
-            clean_chap = self.call_llm(f"提取纯净小说正文(去标签/寒暄)：\n\n{best_chapter}", "清洗者(正文)")
+            # 独立提取清洗者的上下文设定
+            clean_use = self.config.get("cleaner_use_history", False)
+            clean_ctx = int(self.config.get("cleaner_full_ctx_count", 0))
+            clean_hist = self._build_dynamic_history(clean_ctx) if clean_use else ""
+
+            clean_chap = self.call_llm(f"提取纯净小说正文(去标签/寒暄)：\n\n{best_chapter}", "清洗者(正文)", False,
+                                       clean_hist)
             final_text = clean_chap.strip() if clean_chap else best_chapter.strip()
         else:
             match = re.search(r'<text>(.*?)</text>', best_chapter, re.DOTALL | re.IGNORECASE)
             final_text = match.group(1).strip() if match else re.sub(r'^(好的|明白|以下是).*?\n', '',
                                                                      best_chapter).strip()
 
+        # 强制剥离 AI 可能不听话生成的章节标题，防止重连全卷时出现双重章号
+        final_text = re.sub(r'^\s*第[0-9一二三四五六七八九十百千万零〇]+[章节回].*?\n+', '', final_text).strip()
+
         if self.config.get("use_archiver", False):
+            # 独立提取归档者的上下文设定
+            archiver_use = self.config.get("archiver_use_history", False)
+            archiver_ctx = int(self.config.get("archiver_full_ctx_count", 0))
+            archiver_hist = self._build_dynamic_history(archiver_ctx) if archiver_use else ""
+
             archive_prompt = (
                 f"【当前人物设定】：\n{self.current_characters}\n\n"
                 f"【最新章节正文】：\n{final_text}\n\n"
@@ -591,7 +883,7 @@ class AgentWorkflow:
                 "5. 请直接输出更新后的完整设定，绝不要包含“好的”、“以下是”等废话，也不要包裹 markdown 代码块标签（如 ```json）。"
             )
 
-            archive_res = self.call_llm(archive_prompt, "归档者")
+            archive_res = self.call_llm(archive_prompt, "归档者", False, archiver_hist)
 
             if archive_res and "无需更新" not in archive_res:
                 clean_res = re.sub(r'^(好的|明白|没问题|以下是).*?\n', '', archive_res, flags=re.IGNORECASE).strip()
@@ -602,27 +894,76 @@ class AgentWorkflow:
             else:
                 self.log("📂 归档者判断本章无重大设定变更，无需更新。")
 
-        self.full_volume += f"\n\n第{self.current_chapter}章\n{final_text}"
-        self.chapter_texts[self.current_chapter], self.best_chapter = final_text, best_chapter
+        # 将生成的单章存入单独文件，并使用 VolumeManager 重新连接
+        ch_file = os.path.join(VolumeManager.get_chapter_dir(self.book_title), f"{self.current_chapter}.txt")
+        write_file(ch_file, final_text)
+
+        self.chapter_texts[self.current_chapter] = final_text
+        self.best_chapter = final_text
+        self.full_volume = VolumeManager.rebuild_full(self.book_title)
+
         return True
 
-    def _step_compress_phase(self):
-        summaries = self._execute_parallel(int(self.config.get("compressor_count", 1)),
-                                           int(self.config.get("compressor_count", 1)), self.call_llm, lambda i: (
-                f"提取主线剧情发展，包裹在 <summary> 和 </summary> 内！\n内容：\n{self.best_chapter}", f"压缩者 {i + 1}"))
-        if not summaries or not self.is_running: return False
+    def compress_text(self, text, pass_history=True, protagonist_name=""):
+        history_context = ""
+        if pass_history:
+            # 压缩者按自身独立配置读取上下文
+            use_hist = self.config.get("compressor_use_history", False)
+            ctx_count = int(self.config.get("compressor_full_ctx_count", 0))
+            history_context = self._build_dynamic_history(ctx_count) if use_hist else ""
 
-        best_sum, _, _ = self._evaluate_candidates(summaries, "打分(0-100)，输出'分数: X'\n摘要：{content}",
-                                                   "评审者(压缩评分)")
+        protagonist_hint = f"【特别提醒：本文的主角姓名是 {protagonist_name}，请在摘要中务必将其替换为该真名，绝对不要使用代词或“叙述者”】\n" if protagonist_name.strip() else ""
+
+        prompt = (
+            f"【已知人物设定】：\n{self.current_characters or '未提供'}\n\n"
+            f"{protagonist_hint}"
+            f"任务：提取以下文本的主线剧情发展，包裹在 <summary> 和 </summary> 内！\n"
+            f"注意：\n"
+            f"1. 必须使用角色的【具体名字】称呼，绝对不要使用“男主”、“女主”、“叙述者”或“我”等泛泛代称。\n"
+            f"2. 如果原文是第一人称（如“我”），请结合【已知人物设定】及前文语境，在摘要中将其替换为对应角色的真实本名。\n"
+            f"3. 对于关键道具要详细描述，包括外观功能等特性。\n"
+            f"4. 完整概括情节，只返回压缩后的文本。\n\n"
+            f"【待压缩内容】：\n{text}"
+        )
+
+        summaries = self._execute_parallel(
+            int(self.config.get("compressor_count", 1)),
+            int(self.config.get("compressor_count", 1)),
+            self.call_llm,
+            lambda i: (prompt, f"压缩者 {i + 1}", False, history_context)
+        )
+        if not summaries or not self.is_running: return None
+
+        best_sum, _, _ = self._evaluate_candidates(
+            summaries,
+            "打分(0-100)，输出'分数: X'\n摘要：{content}",
+            "评审者(压缩评分)"
+        )
 
         if self.config.get("use_ai_cleaner", False):
-            clean_sum = self.call_llm(f"提取文本中纯净剧情摘要(去标签)：\n\n{best_sum}", "清洗者(摘要)")
+            clean_use = self.config.get("cleaner_use_history", False)
+            clean_ctx = int(self.config.get("cleaner_full_ctx_count", 0))
+            clean_hist = self._build_dynamic_history(clean_ctx) if clean_use else ""
+
+            clean_sum = self.call_llm(f"提取文本中纯净剧情摘要(去标签)：\n\n{best_sum}", "清洗者(摘要)", False,
+                                      clean_hist)
             final_sum = clean_sum.strip() if clean_sum else best_sum.strip()
         else:
             match = re.search(r'<summary>(.*?)</summary>', best_sum, re.DOTALL | re.IGNORECASE)
             final_sum = match.group(1).strip() if match else re.sub(r'^(好的|明白|以下是).*?\n', '', best_sum).strip()
+        return final_sum
 
-        self.compressed_volume += f"\n第{self.current_chapter}卷剧情：{final_sum}"
+    def _step_compress_phase(self):
+        final_sum = self.compress_text(self.best_chapter)
+        if not final_sum: return False
+
+        # 保存单章压缩内容并重连压缩卷
+        sum_file = os.path.join(VolumeManager.get_summary_dir(self.book_title), f"{self.current_chapter}.txt")
+        write_file(sum_file, final_sum)
+
+        self.summary_texts[self.current_chapter] = final_sum
+        self.compressed_volume = VolumeManager.rebuild_compressed(self.book_title)
+
         self.save_local_data()
         self.log(f"第 {self.current_chapter} 章内容已持久化保存。")
         return True
@@ -636,9 +977,13 @@ class AgentWorkflow:
             self.run_event.wait(2);
             return False
 
+        use_hist = self.config.get("designer_use_history", True)
+        ctx_count = int(self.config.get("designer_full_ctx_count", 0))
+        dynamic_history = self._build_dynamic_history(ctx_count) if use_hist else ""
+
         if "已完结" in (self.call_llm(
                 f"当前摘要：{self.compressed_volume}。根据大纲：{self.config.get('outline', '')}，判断是否完结？只回答'已完结'或'未完结'。",
-                "设计者(完结)") or ""):
+                "设计者(完结)", False, dynamic_history) or ""):
             self.log("\n🎉 小说已完结！");
             self.is_running = False;
             return True
@@ -763,10 +1108,19 @@ def toggle_pause():
 
 
 def build_ui():
-    with gr.Blocks(title="自闭环AI小说生成器 v0.4.4 nightly test verion", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("## 📚 自闭环 AI 小说自动生成器 v0.4.4 nightly test verion")
+    with gr.Blocks(title="自闭环AI小说生成构架 v0.4.5 nightly test verion", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("## 📚 自闭环 AI 小说自动生成器 v0.4.5 nightly test verion")
 
         with gr.Tabs():
+            with gr.TabItem("📥 导入半成品小说"):
+                gr.Markdown("### 📥 导入本地进度并自动交由 AI 接管")
+                with gr.Row():
+                    import_file = gr.File(label="上传 .txt 小说文件", file_types=[".txt"])
+                    import_title = gr.Textbox(label="设定新书名（上传后自动提取或手动输入）")
+                import_protagonist = gr.Textbox(label="主角姓名（可选，用于辅助AI在提取第一人称摘要时准确识别主角真名）")
+                import_btn = gr.Button("🚀 开始智能导入与自动处理", variant="primary")
+                import_status = gr.Textbox(label="导入进度状态", lines=5)
+
             with gr.TabItem("✍️ 剧情与设定输入"):
                 with gr.Row():
                     book_title = gr.Textbox(label="书名 (必选)", scale=4)
@@ -823,10 +1177,18 @@ def build_ui():
                             with gr.Row(): agent_mode, agent_count = gr.Dropdown(label=f"【1】加载配置",
                                                                                  choices=[]), gr.Number(
                                 label=f"【2】并发数", precision=0)
+
+                            gr.Markdown("### 📚 【3】读取前文策略")
+                            with gr.Row():
+                                agent_use_history = gr.Checkbox(label="读取前文",
+                                                                value=(en in ["designer", "developer"]))
+                                agent_full_ctx_count = gr.Number(label="完整章数",
+                                                                 value=(20 if en == "developer" else 0), precision=0)
+
                             with gr.Row(): agent_temp, agent_topp, agent_topk = gr.Slider(0.0, 2.0, step=0.1,
                                                                                           label="Temp"), gr.Slider(
                                 0.0, 1.0, step=0.05, label="Top P"), gr.Slider(1, 100, step=1, label="Top K")
-                            gr.Markdown("### 【4】独立 API (留空默认全局)")
+                            gr.Markdown("### ⚙️ 【4】独立 API (留空默认全局)")
                             with gr.Row():
                                 # 添加清晰的 label
                                 a_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="API 类型")
@@ -840,10 +1202,12 @@ def build_ui():
                                 btn_f = gr.Button("🔄 获取模型列表")
                             btn_f.click(fetch_models, inputs=[a_type, a_url, a_keys],
                                         outputs=[a_model, api_status_agent])
-                            agent_inputs_dict[en] = {"mode": agent_mode, "prompt": agent_prompt,
-                                                     "count": agent_count, "temp": agent_temp, "top_p": agent_topp,
-                                                     "top_k": agent_topk, "api_type": a_type, "api_keys": a_keys,
-                                                     "api_url": a_url, "api_model": a_model}
+                            agent_inputs_dict[en] = {"mode": agent_mode, "prompt": agent_prompt, "count": agent_count,
+                                                     "use_history": agent_use_history,
+                                                     "full_ctx_count": agent_full_ctx_count,
+                                                     "temp": agent_temp, "top_p": agent_topp, "top_k": agent_topk,
+                                                     "api_type": a_type, "api_keys": a_keys, "api_url": a_url,
+                                                     "api_model": a_model}
 
             with gr.TabItem("⚙️ 基础&全局API配置"):
                 with gr.Row():
@@ -853,7 +1217,8 @@ def build_ui():
                         need_dev_revise, use_ai_cleaner, use_archiver = gr.Checkbox(
                             label="开发者修改文本"), gr.Checkbox(label="AI提取正文(不建议开启)"), gr.Checkbox(
                             label="归档者更新人物")
-                        context_max_chars = gr.Number(label="前文截取字数", precision=0)
+                        context_max_chars = gr.Number(label="前文最大截取字数", precision=0)
+
                 api_status_main = gr.Textbox(label="全局API获取状态", interactive=False)
                 gr.Markdown("### 【主 API 配置】")
                 with gr.Row():
@@ -888,25 +1253,27 @@ def build_ui():
                 with gr.Row(): btn_download, btn_delete = gr.Button("📦 下载", variant="primary"), gr.Button(
                     "🗑️ 删除", variant="stop")
                 fm_msg, fm_file = gr.Textbox(label="状态"), gr.File(label="下载", visible=False)
+
                 gr.Markdown("--- \n ### 📝 本地章节内容覆写")
                 with gr.Row(): edit_chapter_select, btn_load_ch = gr.Dropdown(label="章节"), gr.Button("📂 获取")
                 edit_status = gr.Markdown("")
                 with gr.Row(): edit_ch_cont, edit_ch_sum = gr.Textbox(label="正文", lines=10), gr.Textbox(
                     label="摘要", lines=10)
-                btn_save_ch = gr.Button("💾 保存修改并同步", variant="primary")
+                btn_save_ch = gr.Button("💾 保存修改并触发AI重新压缩", variant="primary")
 
         # ==========================================
         # 严格收集 Inputs
         # ==========================================
         base_inputs = [book_title, outline, style, characters, use_manual_outline, manual_outline_data, global_prompt,
-                       custom_style_prompt, need_dev_revise, use_ai_cleaner, use_archiver, context_max_chars, api_type,
-                       api_keys, api_url, api_model, fallback_api_type, fallback_api_keys, fallback_api_url,
+                       custom_style_prompt, need_dev_revise, use_ai_cleaner, use_archiver, context_max_chars,
+                       api_type, api_keys, api_url, api_model, fallback_api_type, fallback_api_keys, fallback_api_url,
                        fallback_api_model]
         agent_inputs_list = []
         for _, en, _ in AGENT_NAMES_MAP:
             d = agent_inputs_dict[en]
             agent_inputs_list.extend(
-                [d["mode"], d["prompt"], d["count"], d["temp"], d["top_p"], d["top_k"], d["api_type"], d["api_keys"],
+                [d["mode"], d["prompt"], d["count"], d["use_history"], d["full_ctx_count"], d["temp"], d["top_p"],
+                 d["top_k"], d["api_type"], d["api_keys"],
                  d["api_url"], d["api_model"]])
         all_inputs = base_inputs + agent_inputs_list
 
@@ -952,13 +1319,23 @@ def build_ui():
         btn_download.click(FileManager.export_book_folder, inputs=[book_select], outputs=[fm_file, fm_msg])
         btn_delete.click(FileManager.delete_book, inputs=[book_select], outputs=[fm_msg, book_select])
 
+        # 导入事件绑定
+        import_file.upload(lambda f: os.path.splitext(os.path.basename(f.name))[0] if f else "", inputs=[import_file],
+                           outputs=[import_title])
+        import_btn.click(ImportManager.import_novel,
+                         inputs=[import_file, import_title, import_protagonist] + all_inputs,
+                         outputs=[import_status])
+
         book_select.change(EditManager.get_generated_chapters, inputs=[book_select],
                            outputs=[edit_chapter_select])
         btn_load_ch.click(EditManager.load_chapter, inputs=[book_select, edit_chapter_select],
                           outputs=[edit_ch_cont, edit_ch_sum, edit_status])
+
+        # 将配置一并传入，使修改功能能够实例化 Agent 并调用压缩模型
         btn_save_ch.click(EditManager.save_chapter,
-                          inputs=[book_select, edit_chapter_select, edit_ch_cont, edit_ch_sum],
-                          outputs=[edit_status])
+                          inputs=[book_select, edit_chapter_select, edit_ch_cont] + all_inputs,
+                          outputs=[edit_ch_sum, edit_status])
+
         demo.load(None, inputs=None, outputs=None,
                   js='''() => { alert("温馨提示：这是一个内测版本，功能尚在完善中。有问题请发送邮件至e1351599@u.nus.edu"); }''')
         demo.load(on_app_load, inputs=[], outputs=all_inputs)
