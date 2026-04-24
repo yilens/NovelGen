@@ -80,10 +80,10 @@ def on_app_load_ui():
 def start_generation_ui(*args):
     config = backend.build_config_dict(*args)
     if not config["book_title"].strip() or not config["api_keys"].strip():
-        yield backend.app_state.log_text + "\n❌ 错误: 书名和主API Key不能为空！", gr.update()
+        yield backend.app_state.log_text + "\n❌ 错误: 书名和主API Key不能为空！", gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
         return
     if not config["use_manual_outline"] and not config["outline"].strip():
-        yield backend.app_state.log_text + "\n❌ 错误: 未启用人工大纲时，总大纲不能为空！", gr.update()
+        yield backend.app_state.log_text + "\n❌ 错误: 未启用人工大纲时，总大纲不能为空！", gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
         return
 
     backend.save_config_json(config)
@@ -99,10 +99,30 @@ def start_generation_ui(*args):
     while backend.app_state.workflow and (backend.app_state.workflow.is_running or backend.app_state.thread.is_alive()):
         is_paused = not backend.app_state.workflow.run_event.is_set()
         btn_text = "▶ 继续" if is_paused else "⏸ 暂停"
-        yield backend.app_state.log_text, gr.update(value=btn_text, interactive=True)
+
+        # 处理人工评审阶段 UI 的展示逻辑
+        if backend.app_state.manual_review_pending:
+            if not getattr(backend.app_state, 'review_panel_shown', False):
+                choices = [f"方案 {i + 1}" for i in range(len(backend.app_state.pending_candidates))]
+                backend.app_state.review_panel_shown = True
+                yield (backend.app_state.log_text,
+                       gr.update(value=btn_text, interactive=True),
+                       gr.update(visible=True),
+                       f"**正在评审环节**: {backend.app_state.pending_review_type}",
+                       gr.update(choices=choices, value=choices[0]),
+                       backend.app_state.pending_candidates[0])
+            else:
+                yield backend.app_state.log_text, gr.update(value=btn_text,
+                                                            interactive=True), gr.update(), gr.update(), gr.update(), gr.update()
+        else:
+            backend.app_state.review_panel_shown = False
+            yield backend.app_state.log_text, gr.update(value=btn_text, interactive=True), gr.update(
+                visible=False), gr.update(), gr.update(), gr.update()
+
         time.sleep(0.5)
 
-    yield backend.app_state.log_text, gr.update(value="▶ 开始生成", interactive=True)
+    yield backend.app_state.log_text, gr.update(value="▶ 开始生成", interactive=True), gr.update(
+        visible=False), gr.update(), gr.update(), gr.update()
 
 
 def toggle_pause_ui():
@@ -115,11 +135,12 @@ def toggle_pause_ui():
     backend.app_state.log_callback("▶ 恢复生成...")
     return "⏸ 暂停", "工作流已恢复"
 
+
 def import_manual_outline_ui(f):
     if not f: return gr.update(), "❌ 未选择文件"
-    # f.name 返回本地临时文件的路径
     data, msg = backend.ImportManager.import_manual_outline(f.name)
     return data, msg
+
 
 def import_novel_ui(file_obj, title, protagonist, *config_args):
     if not file_obj or not title.strip():
@@ -138,16 +159,42 @@ def save_chapter_ui(raw_title, chapter_str, new_content, *config_args):
     return gr.update(), msg
 
 
+# 响应选择更改：前端动态刷新人工评审文本
+def on_review_choice_change(choice):
+    if not choice or not backend.app_state.pending_candidates: return ""
+    try:
+        idx = int(choice.split(" ")[1]) - 1
+        return backend.app_state.pending_candidates[idx]
+    except:
+        return backend.app_state.pending_candidates[0]
+
+
+# 提交人工评审修改
+def submit_manual_review(choice, text):
+    if not choice:
+        idx = 0
+    else:
+        try:
+            idx = int(choice.split(" ")[1]) - 1
+        except:
+            idx = 0
+    backend.app_state.manual_review_result = text
+    backend.app_state.manual_review_selected_idx = idx
+    if backend.app_state.workflow:
+        backend.app_state.workflow.manual_review_event.set()
+    return gr.update(visible=False), "✅ 人工评审已提交，工作流继续运行..."
+
+
 # ==========================================
 # 前端 UI 构建逻辑
 # ==========================================
 def build_ui():
-    with gr.Blocks(title="自闭环AI小说生成构架 v0.4.6 nightly test verion", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("## 📚 自闭环 AI 小说自动生成器 v0.4.6 nightly test verion")
+    with gr.Blocks(title="VibeNoving v0.4.7 nightly test verion", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("## 📚 VibeNoving v0.4.7 nightly test verion")
 
         with gr.Tabs():
             with gr.TabItem("📥 导入半成品小说"):
-                gr.Markdown("### 📥 导入本地进度并自动交由 AI 接管")
+                gr.Markdown("### 📥 仅支持章节名为 第x章的小说")
                 with gr.Row():
                     import_file = gr.File(label="上传 .txt 小说文件", file_types=[".txt"])
                     import_title = gr.Textbox(label="设定新书名（上传后自动提取或手动输入）")
@@ -190,7 +237,6 @@ def build_ui():
                     with gr.Row():
                         outline_save_name = gr.Textbox(label="大纲名称")
                         btn_save_outline = gr.Button("💾 保存到本地", variant="primary")
-                        # ⬇️ 这里是新增的导入切片按钮 ⬇️
                         btn_import_outline_txt = gr.UploadButton("📄 导入TXT大纲并切片", file_types=[".txt"])
 
                     outline_op_msg = gr.Markdown("")
@@ -240,7 +286,7 @@ def build_ui():
                                                     placeholder="输入 Key...")
                             with gr.Row():
                                 a_url = gr.Textbox(label="API URL (非Gemini必填)",
-                                                   placeholder="如[https://integrate.api.nvidia.com/v1](https://integrate.api.nvidia.com/v1)")
+                                                   placeholder="如https://integrate.api.nvidia.com/v1")
                                 a_model = gr.Dropdown(label="模型选择", allow_custom_value=True, interactive=True)
                                 btn_f = gr.Button("🔄 获取模型列表")
                             btn_f.click(fetch_models_ui, inputs=[a_type, a_url, a_keys],
@@ -255,12 +301,13 @@ def build_ui():
             with gr.TabItem("⚙️ 基础&全局API配置"):
                 with gr.Row():
                     with gr.Column(scale=2):
-                        global_prompt, custom_style_prompt = gr.Textbox(label="全局提示词(可传入世界观)"), gr.Textbox(
-                            label="自定义风格")
+                        global_prompt = gr.Textbox(label="全局提示词(可传入世界观)")
+                        custom_style_prompt = gr.Textbox(label="自定义风格")
                     with gr.Column(scale=1):
-                        need_dev_revise, use_ai_cleaner, use_archiver = gr.Checkbox(
-                            label="开发者修改文本"), gr.Checkbox(label="AI提取正文(不建议开启)"), gr.Checkbox(
-                            label="归档者更新人物")
+                        use_ai_reviewer = gr.Checkbox(label="开启AI评审(如果不开的话，每章都由用户评审并修改)", value=True)
+                        need_dev_revise = gr.Checkbox(label="开发者修改文本(暂不推荐开启)")
+                        use_ai_cleaner = gr.Checkbox(label="AI提取正文(暂不推荐开启)")
+                        use_archiver = gr.Checkbox(label="暂不推荐开启")
                         context_max_chars = gr.Number(label="前文最大截取字数", precision=0)
 
                 api_status_main = gr.Textbox(label="全局API获取状态", interactive=False)
@@ -291,7 +338,18 @@ def build_ui():
                     btn_start = gr.Button("▶ 开始", variant="primary")
                     btn_pause = gr.Button("⏸ 暂停", interactive=False)
                     btn_save_conf = gr.Button("💾 保存配置")
-                sys_msg, log_output = gr.Textbox(label="系统提示"), gr.Textbox(label="运行日志", lines=25, max_lines=25)
+                    target_chapter = gr.Number(label="生成到第几章 (留空0默认生成所有章节)", precision=0)
+                sys_msg = gr.Textbox(label="系统提示")
+                log_output = gr.Textbox(label="运行日志", lines=25, max_lines=25)
+
+                # 新增人工评审专属面板，当系统挂起时显示
+                with gr.Group(visible=False) as review_panel:
+                    gr.Markdown("### 🙋‍♂️ 人工评审环节 (系统已挂起，等待您选择与修改)")
+                    review_type_msg = gr.Markdown("")
+                    with gr.Row():
+                        review_choices = gr.Radio(label="查看生成的候选方案", choices=[])
+                        btn_review_submit = gr.Button("✅ 确认使用修改后的内容并继续", variant="primary")
+                    review_text = gr.Textbox(label="在此编辑您最喜欢的内容，它将被直接采用", lines=15)
 
             with gr.TabItem("📁 文件与章节管理"):
                 btn_refresh, book_select = gr.Button("🔄 刷新"), gr.Dropdown(label="小说")
@@ -312,7 +370,9 @@ def build_ui():
         # 收集变量
         # ---------------------------
         base_inputs = [book_title, outline, style, characters, use_manual_outline, manual_outline_data, global_prompt,
-                       custom_style_prompt, need_dev_revise, use_ai_cleaner, use_archiver, context_max_chars,
+                       custom_style_prompt, use_ai_reviewer, need_dev_revise, use_ai_cleaner, use_archiver,
+                       context_max_chars,
+                       target_chapter,
                        api_type, api_keys, api_url, api_model, fallback_api_type, fallback_api_keys, fallback_api_url,
                        fallback_api_model]
         agent_inputs_list = []
@@ -365,8 +425,14 @@ def build_ui():
                        res[1]), inputs=[role_dropdown], outputs=[characters, role_op_msg])
         btn_refresh_roles.click(get_roles_ui, inputs=[], outputs=[role_dropdown])
 
-        btn_start.click(start_generation_ui, inputs=all_inputs, outputs=[log_output, btn_pause])
+        btn_start.click(start_generation_ui, inputs=all_inputs,
+                        outputs=[log_output, btn_pause, review_panel, review_type_msg, review_choices, review_text])
         btn_pause.click(toggle_pause_ui, inputs=[], outputs=[btn_pause, sys_msg])
+
+        # 人工评审相关事件绑定
+        review_choices.change(on_review_choice_change, inputs=[review_choices], outputs=[review_text])
+        btn_review_submit.click(submit_manual_review, inputs=[review_choices, review_text],
+                                outputs=[review_panel, sys_msg])
 
         btn_refresh.click(get_books_ui, inputs=[], outputs=[book_select])
         btn_download.click(export_book_folder_ui, inputs=[book_select], outputs=[fm_file, fm_msg])
