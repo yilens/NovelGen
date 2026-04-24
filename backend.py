@@ -32,8 +32,8 @@ BASE_CONFIG_KEYS = [
     ("book_title", ""), ("outline", ""), ("style", ""), ("characters", ""),
     ("use_manual_outline", False), ("manual_outline_data", [[1, "", ""]]),
     ("global_prompt", ""), ("custom_style_prompt", ""),
-    ("need_dev_revise", False), ("use_ai_cleaner", False), ("use_archiver", False),
-    ("context_max_chars", 50000),
+    ("use_ai_reviewer", True), ("need_dev_revise", False), ("use_ai_cleaner", False), ("use_archiver", False),
+    ("context_max_chars", 50000), ("target_chapter", 0),
     ("api_type", "Gemini"), ("api_keys", ""), ("api_url", ""), ("api_model", "gemini-2.5-flash"),
     ("fallback_api_type", "OpenAI Compatible"), ("fallback_api_keys", ""), ("fallback_api_url", ""),
     ("fallback_api_model", "")
@@ -493,8 +493,9 @@ class LLMService:
                          {"role": "assistant", "content": f"以下是我之前已经完成的剧情：\n{history_text}"}])
         msgs.append({"role": "user", "content": final_prompt})
         return \
-        client.chat.completions.create(model=model_name, messages=msgs, temperature=temperature, top_p=top_p).choices[
-            0].message.content
+            client.chat.completions.create(model=model_name, messages=msgs, temperature=temperature,
+                                           top_p=top_p).choices[
+                0].message.content
 
 
 class APIKeyManager:
@@ -547,6 +548,10 @@ class AgentWorkflow:
         self.key_manager = APIKeyManager()
         self.run_event = threading.Event()
         self.run_event.set()
+
+        self.manual_review_event = threading.Event()
+        self.manual_review_event.set()
+
         self.is_running = False
 
         self.book_title = safe_name(self.config.get("book_title", "未命名小说")) or "未命名小说"
@@ -582,6 +587,12 @@ class AgentWorkflow:
             save_json(self.role_file, {"characters": self.current_characters})
 
         self.use_manual, self.manual_dict, self.max_manual_chapter = self.config.get("use_manual_outline", False), {}, 0
+
+        try:
+            self.target_chapter = int(self.config.get("target_chapter", 0) or 0)
+        except (ValueError, TypeError):
+            self.target_chapter = 0
+
         if self.use_manual:
             for r in self.config.get("manual_outline_data", []):
                 if len(r) >= 3 and r[0] and (r[1] or r[2]):
@@ -589,6 +600,15 @@ class AgentWorkflow:
             if self.manual_dict:
                 self.max_manual_chapter = max(self.manual_dict.keys())
                 self.log(f"✅ 人工大纲加载成功，目标完结章：第 {self.max_manual_chapter} 章")
+
+                if self.target_chapter <= 0:
+                    self.target_chapter = self.max_manual_chapter
+                else:
+                    self.target_chapter = min(max(self.current_chapter, self.target_chapter), self.max_manual_chapter)
+                self.log(f"🎯 设定当前生成目标至：第 {self.target_chapter} 章")
+        else:
+            if self.target_chapter > 0:
+                self.log(f"🎯 设定当前生成目标至：第 {self.target_chapter} 章")
 
     def _build_dynamic_history(self, full_count):
         actual_full = max(0, min(full_count, self.current_chapter - 1))
@@ -671,7 +691,9 @@ class AgentWorkflow:
         self.run_event.set()
 
     def stop(self):
-        self.is_running = False; self.run_event.set()
+        self.is_running = False
+        self.run_event.set()
+        self.manual_review_event.set()
 
     def call_llm(self, prompt, role="Agent", use_fallback=False, history_text=""):
         self.run_event.wait()
@@ -718,7 +740,7 @@ class AgentWorkflow:
             return self.call_llm(prompt, role, True, history_text)
 
         self.log(f"[{role}] ⛔ 彻底失败！暂停。")
-        self.pause();
+        self.pause()
         self.run_event.wait()
         if self.is_running: return self.call_llm(prompt, role, False, history_text)
         return None
@@ -734,6 +756,26 @@ class AgentWorkflow:
 
     def _evaluate_candidates(self, candidates, review_prompt_tpl, reviewer_role):
         if not candidates: return None, -1, 0
+
+        # --- 人工评审环节逻辑 ---
+        if not self.config.get("use_ai_reviewer", True):
+            self.log(f"⏸ 触发人工评审环节 [{reviewer_role}] (共 {len(candidates)} 个候选方案等待确认)...")
+            app_state.pending_candidates = candidates
+            app_state.pending_review_type = reviewer_role
+            app_state.manual_review_pending = True
+            self.manual_review_event.clear()
+
+            while not self.manual_review_event.is_set():
+                if not self.is_running:
+                    app_state.manual_review_pending = False
+                    return None, 0, 0
+                time.sleep(0.5)
+
+            app_state.manual_review_pending = False
+            self.log(f"✅ 人工评审完成，选用并修改了方案 {app_state.manual_review_selected_idx + 1}")
+            return app_state.manual_review_result, 100, app_state.manual_review_selected_idx
+        # ------------------------
+
         if len(candidates) == 1: return candidates[0], 100, 0
         rev_count = max(1, int(self.config.get("reviewer_count", 1)))
 
@@ -875,12 +917,16 @@ class AgentWorkflow:
         return True
 
     def _step_check_finish(self):
+        if self.target_chapter > 0 and self.current_chapter >= self.target_chapter:
+            if self.use_manual and self.current_chapter >= self.max_manual_chapter:
+                self.log("\n🎉 人工大纲完成！完结。")
+            else:
+                self.log(f"\n🎉 已生成至目标章节 (第 {self.target_chapter} 章)，自动停止。")
+            self.is_running = False
+            return True
+
         if self.use_manual:
-            if self.current_chapter >= self.max_manual_chapter:
-                self.log("\n🎉 人工大纲完成！完结。");
-                self.is_running = False;
-                return True
-            self.run_event.wait(2);
+            self.run_event.wait(2)
             return False
 
         hist_ctx = self._build_dynamic_history(int(self.config.get("designer_full_ctx_count", 0))) if self.config.get(
@@ -898,6 +944,14 @@ class AgentWorkflow:
 class AppState:
     def __init__(self):
         self.workflow, self.thread, self.logs, self.log_text = None, None, [], ""
+
+        # 人工评审相关状态
+        self.manual_review_pending = False
+        self.pending_candidates = []
+        self.pending_review_type = ""
+        self.manual_review_result = ""
+        self.manual_review_selected_idx = 0
+        self.review_panel_shown = False
 
     def log_callback(self, msg):
         self.logs.append(msg)
