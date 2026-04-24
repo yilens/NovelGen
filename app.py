@@ -193,15 +193,6 @@ def build_ui():
         gr.Markdown("## 📚 VibeNoving v0.4.7 nightly test verion")
 
         with gr.Tabs():
-            with gr.TabItem("📥 导入半成品小说"):
-                gr.Markdown("### 📥 仅支持章节名为 第x章的小说")
-                with gr.Row():
-                    import_file = gr.File(label="上传 .txt 小说文件", file_types=[".txt"])
-                    import_title = gr.Textbox(label="设定新书名（上传后自动提取或手动输入）")
-                import_protagonist = gr.Textbox(label="主角姓名（可选，用于辅助AI在提取第一人称摘要时准确识别主角真名）")
-                import_btn = gr.Button("🚀 开始智能导入与自动处理", variant="primary")
-                import_status = gr.Textbox(label="导入进度状态", lines=5)
-
             with gr.TabItem("✍️ 剧情与设定输入"):
                 with gr.Row():
                     book_title = gr.Textbox(label="书名 (必选)", scale=4)
@@ -245,9 +236,18 @@ def build_ui():
                                                        row_count=(1, "dynamic"), interactive=True, type="array")
                     btn_add_manual_row = gr.Button("➕ 新增一章大纲", size="sm")
 
-            with gr.TabItem("🤖 Agent 综合专属配置"):
+            with gr.TabItem("📥 导入半成品小说"):
+                gr.Markdown("### 📥 仅支持章节名为 第x章的小说")
+                with gr.Row():
+                    import_file = gr.File(label="上传 .txt 小说文件", file_types=[".txt"])
+                    import_title = gr.Textbox(label="设定书名(上传后自动提取或手动输入)")
+                import_protagonist = gr.Textbox(label="主角姓名(可选，用于第一人称小说，不然AI不知道主角的名字)")
+                import_btn = gr.Button("🚀 开始处理", variant="primary")
+                import_status = gr.Textbox(label="导入进度状态", lines=5)
+
+            with gr.TabItem("🤖 Agent 独立配置"):
                 agent_inputs_dict = {}
-                with gr.Accordion("➕ 新建全局模式预设", open=False):
+                with gr.Accordion("➕ 新建Agent预设", open=False):
                     new_mode_name, new_mode_sys, new_mode_intro = gr.Textbox(label="预设名"), gr.Textbox(
                         label="Agent人设"), gr.Textbox(label="自我介绍")
                     new_mode_history = gr.Dataframe(headers=["用户输入", "模型回复"], datatype=["str", "str"],
@@ -260,12 +260,12 @@ def build_ui():
                 with gr.Tabs():
                     for zh, en, _ in backend.AGENT_NAMES_MAP:
                         with gr.TabItem(f"{zh} ({en})"):
-                            agent_prompt = gr.Textbox(label=f"【0】{zh} 专属额外提示词", lines=2)
+                            agent_prompt = gr.Textbox(label=f"{zh} 专属额外提示词", lines=2)
                             with gr.Row():
-                                agent_mode, agent_count = gr.Dropdown(label=f"【1】加载配置", choices=[]), gr.Number(
-                                    label=f"【2】并发数", precision=0)
+                                agent_mode, agent_count = gr.Dropdown(label=f"加载配置", choices=[]), gr.Number(
+                                    label=f"并发数", precision=0)
 
-                            gr.Markdown("### 📚 【3】读取前文策略")
+                            gr.Markdown("读取前文策略")
                             with gr.Row():
                                 agent_use_history = gr.Checkbox(label="读取前文",
                                                                 value=(en in ["designer", "developer"]))
@@ -279,7 +279,7 @@ def build_ui():
                                                                                                         label="Top P"), gr.Slider(
                                     1, 100, step=1, label="Top K")
 
-                            gr.Markdown("### ⚙️ 【4】独立 API (留空默认全局)")
+                            gr.Markdown("独立 API (留空默认使用全局Api)")
                             with gr.Row():
                                 a_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="API 类型")
                                 a_keys = gr.Textbox(label="API Keys(逗号隔开)", type="password",
@@ -307,8 +307,8 @@ def build_ui():
                         use_ai_reviewer = gr.Checkbox(label="开启AI评审(如果不开的话，每章都由用户评审并修改)", value=True)
                         need_dev_revise = gr.Checkbox(label="开发者修改文本(暂不推荐开启)")
                         use_ai_cleaner = gr.Checkbox(label="AI提取正文(暂不推荐开启)")
-                        use_archiver = gr.Checkbox(label="暂不推荐开启")
-                        context_max_chars = gr.Number(label="前文最大截取字数", precision=0)
+                        use_archiver = gr.Checkbox(label="归档者更新人物(暂不推荐开启)")
+                        context_max_chars = gr.Number(label="前文最大截取字数(Agent读取的完整前文上限)", precision=0)
 
                 api_status_main = gr.Textbox(label="全局API获取状态", interactive=False)
                 gr.Markdown("### 【主 API 配置】")
@@ -349,7 +349,7 @@ def build_ui():
                     with gr.Row():
                         review_choices = gr.Radio(label="查看生成的候选方案", choices=[])
                         btn_review_submit = gr.Button("✅ 确认使用修改后的内容并继续", variant="primary")
-                    review_text = gr.Textbox(label="在此编辑您最喜欢的内容，它将被直接采用", lines=15)
+                    review_text = gr.Textbox(label="在此编辑您最喜欢的内容，它将被采用", lines=15)
 
             with gr.TabItem("📁 文件与章节管理"):
                 btn_refresh, book_select = gr.Button("🔄 刷新"), gr.Dropdown(label="小说")
@@ -451,7 +451,7 @@ def build_ui():
                           outputs=[edit_ch_sum, edit_status])
 
         demo.load(None, inputs=None, outputs=None,
-                  js='''() => { alert("温馨提示：这是一个内测版本，功能尚在完善中。有问题请发送邮件至e1351599@u.nus.edu"); }''')
+                  js='''() => { alert("温馨提示：这是一个内测版本，功能尚在完善中，禁止倒卖软件用于盈利。有问题请发送邮件至e1351599@u.nus.edu"); }''')
 
     return demo
 

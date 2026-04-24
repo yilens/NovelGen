@@ -19,13 +19,13 @@ ROLE_MAP = {
 }
 
 AGENT_NAMES_MAP = [
-    ("设计者", "designer", "Designer_R18.json"),
-    ("开发者", "developer", "Developer_R18.json"),
-    ("评审者", "reviewer", "Reviewer_R18.json"),
-    ("裁判者", "judge", "Judger_R18.json"),
-    ("压缩者", "compressor", "Compressor_R18.json"),
-    ("清洗者", "cleaner", "Cleaner_R18.json"),
-    ("归档者", "archiver", "Archiver_R18.json")
+    ("设计者", "designer", "Designer_R16.json"),
+    ("开发者", "developer", "Developer_R16.json"),
+    ("评审者", "reviewer", "Reviewer_R16.json"),
+    ("裁判者", "judge", "Judger_R16.json"),
+    ("压缩者", "compressor", "Compressor_R16.json"),
+    ("清洗者", "cleaner", "Cleaner_R16.json"),
+    ("归档者", "archiver", "Archiver_R16.json")
 ]
 
 BASE_CONFIG_KEYS = [
@@ -805,7 +805,6 @@ class AgentWorkflow:
     def _step_design_phase(self):
         if self.use_manual:
             if not (info := self.manual_dict.get(self.current_chapter)):
-                # 【关键修复点】：如果匹配不到大纲，抛出明确错误提示，不要静默死亡
                 self.log(
                     f"❌ 找不到第 {self.current_chapter} 章的人工大纲，自动停止运行。请检查 UI 界面【人工制定各章大纲模式】中的章节号是否与当前的生成进度对应！")
                 self.is_running = False
