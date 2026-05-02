@@ -32,9 +32,10 @@ BASE_CONFIG_KEYS = [
     ("book_title", ""), ("outline", ""), ("style", ""), ("characters", ""),
     ("use_manual_outline", False), ("manual_outline_data", [[1, "", ""]]),
     ("global_prompt", ""), ("custom_style_prompt", ""),
-    ("designer_use_manual_review", False), ("developer_use_manual_review", False), ("compressor_use_manual_review", False),
+    ("designer_use_manual_review", False), ("developer_use_manual_review", False),
+    ("compressor_use_manual_review", False),
     ("need_dev_revise", False), ("use_archiver", False),
-    ("context_max_chars", 50000), ("target_chapter", 0),
+    ("context_max_chars", 50000), ("target_chapter", 0), ("vibenoving_context_count", 5),
     ("api_type", "Gemini"), ("api_keys", ""), ("api_url", ""), ("api_model", ""),
     ("fallback_api_type", "OpenAI Compatible"), ("fallback_api_keys", ""), ("fallback_api_url", ""),
     ("fallback_api_model", "")
@@ -427,6 +428,8 @@ class EditManager:
         VolumeManager.rebuild_full(raw_title)
 
         try:
+            # 强制取消保存时的压缩端人工审查，防止后端死锁挂起
+            config["compressor_use_manual_review"] = False
             workflow = AgentWorkflow(config, lambda msg: print(msg))
             workflow.is_running = True
             final_sum = workflow.compress_text(new_content)
@@ -444,6 +447,55 @@ class EditManager:
                 return None, f"⚠️ 章节修改成功，但 AI 压缩者异常，请检查配置或重试。"
         except Exception as e:
             return None, f"❌ 修改成功，但后台压缩环节出现错误: {e}"
+
+    @staticmethod
+    def run_vibenoving(raw_title, chapter_str, current_text, selected_text, user_prompt, config):
+        """局部重写核心逻辑(VibeNoving)"""
+        if not selected_text.strip(): return "❌ 请先选中并填入需要修改的原文片段。"
+        if not user_prompt.strip(): return "❌ 请输入修改方向。"
+
+        ch_num = 1
+        if chapter_str and isinstance(chapter_str, str):
+            match = re.search(r'\d+', chapter_str)
+            if match: ch_num = int(match.group())
+        elif hasattr(app_state, 'workflow') and app_state.workflow:
+            ch_num = app_state.workflow.current_chapter
+
+        vibe_ctx_count = int(config.get("vibenoving_context_count", 5))
+        history = ""
+        if vibe_ctx_count > 0 and raw_title:
+            sum_dir = VolumeManager.get_summary_dir(raw_title)
+            sums = []
+            for i in range(max(1, ch_num - vibe_ctx_count), ch_num):
+                sf = os.path.join(sum_dir, f"{i}.txt")
+                if os.path.exists(sf):
+                    sums.append(f"第{i}章摘要：{read_file(sf)}")
+            if sums:
+                history = "【前文背景】\n" + "\n".join(sums)
+
+        sys_prompt = "你是一个专业的小说编辑和润色助手。你需要根据前文背景和用户的具体要求，对小说片段进行重写或润色。\n\n**严格遵守以下规则**：\n1. 你【只能】输出修改后的这部分片段文本，不要包含原章节的其它未修改段落。\n2. 绝不能输出任何解释、寒暄或总结性的话语。\n3. 必须保持原有的人称和核心设定。"
+        llm_prompt = f"{history}\n\n【本章当前完整内容参考】\n{current_text}\n\n【需要你修改的原文片段】\n{selected_text}\n\n【修改方向/要求】\n{user_prompt}\n\n请直接输出修改后的片段文本："
+
+        api_type = config.get("api_type", "Gemini")
+        api_keys = config.get("api_keys", "")
+        api_url = config.get("api_url", "")
+        api_model = config.get("api_model", "")
+
+        if not api_keys:
+            return "❌ 未配置全局 API Key，请在设置中配置。"
+
+        try:
+            km = APIKeyManager()
+            api_key = km.get_next_key(api_keys)
+            if api_type == "Gemini":
+                res = LLMService.call_gemini(api_key, api_model, sys_prompt, llm_prompt,
+                                             "收到，我将仅返回修改后的文本段落。", [], "", 0.7, 0.9, 40)
+            else:
+                res = LLMService.call_openai(api_key, api_url, api_model, sys_prompt, llm_prompt,
+                                             "收到，我将仅返回修改后的文本段落。", [], "", 0.7, 0.9)
+            return str(res).strip()
+        except Exception as e:
+            return f"❌ VibeNoving 生成失败: {e}"
 
 
 # ==========================================
@@ -854,6 +906,7 @@ class AgentWorkflow:
             app_state.pending_candidates = candidates
             app_state.pending_review_type = reviewer_role
             app_state.manual_review_pending = True
+            app_state.manual_review_retry = False
             self.manual_review_event.clear()
 
             while not self.manual_review_event.is_set():
@@ -863,6 +916,12 @@ class AgentWorkflow:
                 time.sleep(0.5)
 
             app_state.manual_review_pending = False
+
+            # 捕获用户是否点击了“重试”
+            if getattr(app_state, 'manual_review_retry', False):
+                self.log(f"🔄 用户选择了重试当前生成环节 [{reviewer_role}]...")
+                return "_RETRY_", -1, -1
+
             self.log(f"✅ 人工评审完成，选用并修改了方案 {app_state.manual_review_selected_idx + 1}")
             return app_state.manual_review_result, 100, app_state.manual_review_selected_idx
         # ------------------------
@@ -907,13 +966,17 @@ class AgentWorkflow:
         hist_ctx = self._build_dynamic_history(int(self.config.get("designer_full_ctx_count", 0))) if self.config.get(
             "designer_use_history", True) else ""
 
-        plans = self._execute_parallel(int(self.config.get("designer_count", 1)),
-                                       int(self.config.get("designer_count", 1)), self.call_llm, lambda i: (
-                f"大纲：{self.config.get('outline', '')}。风格：{self.config.get('style', '')}。人物：{self.current_characters}。\n**仅为第{self.current_chapter}章**制定简短精炼计划。",
-                f"设计者 {i + 1}", False, hist_ctx))
-        if not plans or not self.is_running: return False
-        self.best_plan, _, _ = self._evaluate_candidates(plans, "打分(0-100)，输出'分数: X'\n计划：{content}",
-                                                         "评审者(计划)")
+        # 利用 while 循环支持用户反复重试本环节
+        while True:
+            plans = self._execute_parallel(int(self.config.get("designer_count", 1)),
+                                           int(self.config.get("designer_count", 1)), self.call_llm, lambda i: (
+                    f"大纲：{self.config.get('outline', '')}。风格：{self.config.get('style', '')}。人物：{self.current_characters}。\n**仅为第{self.current_chapter}章**制定简短精炼计划。",
+                    f"设计者 {i + 1}", False, hist_ctx))
+            if not plans or not self.is_running: return False
+            self.best_plan, _, _ = self._evaluate_candidates(plans, "打分(0-100)，输出'分数: X'\n计划：{content}",
+                                                             "评审者(计划)")
+            if self.best_plan == "_RETRY_": continue
+            break
         return True
 
     def _step_develop_phase(self):
@@ -921,16 +984,19 @@ class AgentWorkflow:
         hist_ctx = self._build_dynamic_history(int(self.config.get("developer_full_ctx_count", 20))) if self.config.get(
             "developer_use_history", True) else ""
 
-        # 移除了原有的 <text> 包裹要求，底层 Function Calling 机制将直接获取结果
-        chapters = self._execute_parallel(int(self.config.get("developer_count", 1)),
-                                          int(self.config.get("developer_count", 1)), self.call_llm, lambda i: (
-                f"根据计划编写第{self.current_chapter}章正文(>2000字)。\n计划：{self.best_plan}\n",
-                f"开发者 {i + 1}", False, hist_ctx))
-        if not chapters or not self.is_running: return False
+        while True:
+            # 移除了原有的 <text> 包裹要求，底层 Function Calling 机制将直接获取结果
+            chapters = self._execute_parallel(int(self.config.get("developer_count", 1)),
+                                              int(self.config.get("developer_count", 1)), self.call_llm, lambda i: (
+                    f"根据计划编写第{self.current_chapter}章正文(>2000字)。\n计划：{self.best_plan}\n",
+                    f"开发者 {i + 1}", False, hist_ctx))
+            if not chapters or not self.is_running: return False
 
-        best_chapter, _, best_idx = self._evaluate_candidates(chapters,
-                                                              f"打分(0-100)。\n计划：{self.best_plan}\n正文：{{content}}",
-                                                              "评审者(打分)")
+            best_chapter, _, best_idx = self._evaluate_candidates(chapters,
+                                                                  f"打分(0-100)。\n计划：{self.best_plan}\n正文：{{content}}",
+                                                                  "评审者(打分)")
+            if best_chapter == "_RETRY_": continue
+            break
 
         if self.config.get("need_dev_revise", False):
             r_hist = self._build_dynamic_history(int(self.config.get("reviewer_full_ctx_count", 0))) if self.config.get(
@@ -980,17 +1046,19 @@ class AgentWorkflow:
             "compressor_use_history", False) else ""
         phint = f"主角是 {protagonist_name}，请用其真名。\n" if protagonist_name.strip() else ""
 
-        # 移除了原有 <summary> 的包裹要求
-        summaries = self._execute_parallel(int(self.config.get("compressor_count", 1)),
-                                           int(self.config.get("compressor_count", 1)), self.call_llm, lambda i: (
-                f"设定：{self.current_characters}\n{phint}请提取剧情主线摘要。\n正文：\n{text}",
-                f"压缩者 {i + 1}", False, hist_ctx))
-        if not summaries or not self.is_running: return None
+        while True:
+            # 移除了原有 <summary> 的包裹要求
+            summaries = self._execute_parallel(int(self.config.get("compressor_count", 1)),
+                                               int(self.config.get("compressor_count", 1)), self.call_llm, lambda i: (
+                    f"设定：{self.current_characters}\n{phint}请提取剧情主线摘要。\n正文：\n{text}",
+                    f"压缩者 {i + 1}", False, hist_ctx))
+            if not summaries or not self.is_running: return None
 
-        best_sum, _, _ = self._evaluate_candidates(summaries, "打分(0-100)\n摘要：{content}", "评审者(压缩)")
+            best_sum, _, _ = self._evaluate_candidates(summaries, "打分(0-100)\n摘要：{content}", "评审者(压缩)")
+            if best_sum == "_RETRY_": continue
 
-        # Tools 直出的文本，不需要正则表达式拦截匹配
-        return str(best_sum).strip()
+            # Tools 直出的文本，不需要正则表达式拦截匹配
+            return str(best_sum).strip()
 
     def _step_compress_phase(self):
         if not (final_sum := self.compress_text(self.best_chapter)): return False
@@ -1037,6 +1105,9 @@ class AppState:
         self.manual_review_result = ""
         self.manual_review_selected_idx = 0
         self.review_panel_shown = False
+
+        # 重试标识位
+        self.manual_review_retry = False
 
     def log_callback(self, msg):
         self.logs.append(msg)

@@ -194,12 +194,45 @@ def submit_manual_review(choice, text):
     return gr.update(visible=False), "✅ 人工评审已提交，工作流继续运行..."
 
 
+# 提交重试当前评审环节
+def submit_manual_retry():
+    backend.app_state.manual_review_retry = True
+    if backend.app_state.workflow:
+        backend.app_state.workflow.manual_review_event.set()
+    return gr.update(visible=False), "🔄 正在重新生成当前环节候选，请稍候..."
+
+
+# VibeNoving 局部生成交互逻辑 (评审面板)
+def run_vibe_review(current_text, selected_text, prompt, *config_args):
+    config = backend.build_config_dict(*config_args)
+    title = backend.app_state.workflow.book_title if backend.app_state.workflow else config.get("book_title", "")
+    ch_num = backend.app_state.workflow.current_chapter if backend.app_state.workflow else 1
+    return backend.EditManager.run_vibenoving(title, f"第{ch_num}章", current_text, selected_text, prompt, config)
+
+
+# VibeNoving 局部生成交互逻辑 (修改面板)
+def run_vibe_edit(book_sel, ch_sel, current_text, selected_text, prompt, *config_args):
+    config = backend.build_config_dict(*config_args)
+    return backend.EditManager.run_vibenoving(book_sel, ch_sel, current_text, selected_text, prompt, config)
+
+
+# VibeNoving 应用替换逻辑
+def apply_vibe(full_text, selected_text, new_text):
+    if not selected_text or not new_text or "❌" in new_text:
+        return full_text
+    if selected_text in full_text:
+        return full_text.replace(selected_text, new_text)
+    elif selected_text.strip() in full_text:
+        return full_text.replace(selected_text.strip(), new_text.strip())
+    return full_text
+
+
 # ==========================================
 # 前端 UI 构建逻辑
 # ==========================================
 def build_ui():
-    with gr.Blocks(title="VibeNoving v0.4.8 nightly test verion", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("## 📚 VibeNoving v0.4.8 nightly test verion")
+    with gr.Blocks(title="VibeNoving v0.4.9 nightly test version", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("## 📚 VibeNoving v0.4.9 nightly test version")
 
         with gr.Tabs():
             with gr.TabItem("✍️ 剧情与设定输入"):
@@ -322,6 +355,8 @@ def build_ui():
                         need_dev_revise = gr.Checkbox(label="开发者修改文本(暂不推荐开启)")
                         use_archiver = gr.Checkbox(label="归档者更新人物(暂不推荐开启)")
                         context_max_chars = gr.Number(label="前文最大截取字数(Agent读取的完整前文上限)", precision=0)
+                        vibenoving_context_count = gr.Number(label="VibeNoving前文参考章数(推荐5)", value=5,
+                                                             precision=0)
 
                 api_status_main = gr.Textbox(label="全局API获取状态", interactive=False)
                 gr.Markdown("### 【主 API 配置】")
@@ -362,7 +397,17 @@ def build_ui():
                     with gr.Row():
                         review_choices = gr.Radio(label="查看生成的候选方案", choices=[])
                         btn_review_submit = gr.Button("✅ 确认使用修改后的内容并继续", variant="primary")
+                        btn_review_retry = gr.Button("🔄 不满意？重试本环节", variant="stop")
                     review_text = gr.Textbox(label="在此编辑您最喜欢的内容，它将被采用", lines=15)
+
+                    with gr.Accordion("✨ VibeNoving (局部细节重写)", open=False):
+                        gr.Markdown("觉得某段写得不够好？复制那段文本，让AI根据前文和你的要求专门重写！")
+                        with gr.Row():
+                            vibe_selected = gr.Textbox(label="选中的待修改片段 (请从上方文本框中复制过来)", lines=3)
+                            vibe_prompt = gr.Textbox(label="修改方向 (如：写得更有文采、扩写细节、修改对话)", lines=3)
+                        btn_vibe_gen = gr.Button("🚀 局部重写")
+                        vibe_result = gr.Textbox(label="AI 修改建议 (确认无误后点击下方按钮替换)", lines=4)
+                        btn_vibe_apply = gr.Button("✅ 确认替换到上方文本框中")
 
             with gr.TabItem("📁 文件与章节管理"):
                 btn_refresh, book_select = gr.Button("🔄 刷新"), gr.Dropdown(label="小说")
@@ -377,16 +422,25 @@ def build_ui():
                 edit_status = gr.Markdown("")
                 with gr.Row():
                     edit_ch_cont, edit_ch_sum = gr.Textbox(label="正文", lines=10), gr.Textbox(label="摘要", lines=10)
+
+                with gr.Accordion("✨ VibeNoving (局部细节重写)", open=False):
+                    gr.Markdown("选中正文下方需要重写的一小段文本，输入要求，让AI专门修改这段！")
+                    with gr.Row():
+                        vibe_edit_selected = gr.Textbox(label="选中的待修改片段 (请从上方正文中复制过来)", lines=3)
+                        vibe_edit_prompt = gr.Textbox(label="修改方向 (如：加入环境描写、增加动作细节)", lines=3)
+                    btn_vibe_edit_gen = gr.Button("🚀 局部重写")
+                    vibe_edit_result = gr.Textbox(label="AI 修改建议", lines=4)
+                    btn_vibe_edit_apply = gr.Button("✅ 确认替换到上方正文框中")
+
                 btn_save_ch = gr.Button("💾 保存修改并触发AI重新压缩", variant="primary")
 
         # ---------------------------
-        # 收集变量
+        # 收集变量 (与BASE_CONFIG_KEYS完全一致顺序)
         # ---------------------------
         base_inputs = [book_title, outline, style, characters, use_manual_outline, manual_outline_data, global_prompt,
                        custom_style_prompt, designer_use_manual_review, developer_use_manual_review,
                        compressor_use_manual_review, need_dev_revise, use_archiver,
-                       context_max_chars,
-                       target_chapter,
+                       context_max_chars, target_chapter, vibenoving_context_count,
                        api_type, api_keys, api_url, api_model, fallback_api_type, fallback_api_keys, fallback_api_url,
                        fallback_api_model]
         agent_inputs_list = []
@@ -448,6 +502,17 @@ def build_ui():
         review_choices.change(on_review_choice_change, inputs=[review_choices], outputs=[review_text])
         btn_review_submit.click(submit_manual_review, inputs=[review_choices, review_text],
                                 outputs=[review_panel, sys_msg])
+        btn_review_retry.click(submit_manual_retry, inputs=[], outputs=[review_panel, sys_msg])
+
+        # VibeNoving 事件绑定
+        btn_vibe_gen.click(run_vibe_review, inputs=[review_text, vibe_selected, vibe_prompt] + all_inputs,
+                           outputs=[vibe_result])
+        btn_vibe_apply.click(apply_vibe, inputs=[review_text, vibe_selected, vibe_result], outputs=[review_text])
+        btn_vibe_edit_gen.click(run_vibe_edit,
+                                inputs=[book_select, edit_chapter_select, edit_ch_cont, vibe_edit_selected,
+                                        vibe_edit_prompt] + all_inputs, outputs=[vibe_edit_result])
+        btn_vibe_edit_apply.click(apply_vibe, inputs=[edit_ch_cont, vibe_edit_selected, vibe_edit_result],
+                                  outputs=[edit_ch_cont])
 
         btn_refresh.click(get_books_ui, inputs=[], outputs=[book_select])
         btn_download.click(export_book_folder_ui, inputs=[book_select], outputs=[fm_file, fm_msg])
