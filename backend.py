@@ -6,7 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from google.genai import types
 from openai import OpenAI
-import mode  # 假设存在于您的环境中
+import mode
+import tools  # 引入新定义的工具层
 
 # ==========================================
 # 常量配置与全局初始化
@@ -15,7 +16,7 @@ MAX_API_RETRIES = 10
 
 ROLE_MAP = {
     "设计者": "designer", "开发者": "developer", "评审者": "reviewer",
-    "裁判者": "judge", "压缩者": "compressor", "清洗者": "cleaner", "归档者": "archiver"
+    "裁判者": "judge", "压缩者": "compressor", "归档者": "archiver"
 }
 
 AGENT_NAMES_MAP = [
@@ -24,7 +25,6 @@ AGENT_NAMES_MAP = [
     ("评审者", "reviewer", "Reviewer_R16.json"),
     ("裁判者", "judge", "Judger_R16.json"),
     ("压缩者", "compressor", "Compressor_R16.json"),
-    ("清洗者", "cleaner", "Cleaner_R16.json"),
     ("归档者", "archiver", "Archiver_R16.json")
 ]
 
@@ -32,9 +32,10 @@ BASE_CONFIG_KEYS = [
     ("book_title", ""), ("outline", ""), ("style", ""), ("characters", ""),
     ("use_manual_outline", False), ("manual_outline_data", [[1, "", ""]]),
     ("global_prompt", ""), ("custom_style_prompt", ""),
-    ("use_ai_reviewer", True), ("need_dev_revise", False), ("use_ai_cleaner", False), ("use_archiver", False),
+    ("designer_use_manual_review", False), ("developer_use_manual_review", False), ("compressor_use_manual_review", False),
+    ("need_dev_revise", False), ("use_archiver", False),
     ("context_max_chars", 50000), ("target_chapter", 0),
-    ("api_type", "Gemini"), ("api_keys", ""), ("api_url", ""), ("api_model", "gemini-2.5-flash"),
+    ("api_type", "Gemini"), ("api_keys", ""), ("api_url", ""), ("api_model", ""),
     ("fallback_api_type", "OpenAI Compatible"), ("fallback_api_keys", ""), ("fallback_api_url", ""),
     ("fallback_api_model", "")
 ]
@@ -50,7 +51,7 @@ for _, en, d_val in AGENT_NAMES_MAP:
         (f"{en}_temperature", 0.9 if en != "designer" else 0.7),
         (f"{en}_top_p", 0.9), (f"{en}_top_k", 40),
         (f"{en}_api_type", "Gemini"), (f"{en}_api_keys", ""), (f"{en}_api_url", ""),
-        (f"{en}_api_model", "gemini-2.5-flash")
+        (f"{en}_api_model", "")
     ])
 
 ALL_CONFIG_KEYS = BASE_CONFIG_KEYS + AGENT_CONFIG_KEYS
@@ -383,13 +384,9 @@ class ImportManager:
             ch_content = parts[i + 1].strip() if i + 1 < len(parts) else ""
             ch_title_clean = re.sub(r"^第[0-9一二三四五六七八九十百千万零〇]+[章节回]\s*", "", ch_title_raw).strip()
 
-            # 智能解析出真实的章节号（如 61）
             actual_ch_num = ImportManager.parse_chapter_number(ch_title_raw, ch_idx_fallback)
 
-            # 填入数据：[章节号(int), 章节名(str), 概要(str)]
             outline_data.append([actual_ch_num, ch_title_clean, ch_content])
-
-            # 为下一章准备一个 fallback 号码（以防下一章没有写“第几章”）
             ch_idx_fallback = actual_ch_num + 1
 
         if not outline_data:
@@ -455,13 +452,33 @@ class EditManager:
 class LLMService:
     @staticmethod
     def call_gemini(api_key, model_name, sys_inst, final_prompt, model_intro, pre_history, history_text, temperature,
-                    top_p, top_k):
+                    top_p, top_k, role_key=None):
         client = genai.Client(api_key=api_key)
         safeties = [types.SafetySetting(category=c, threshold="BLOCK_NONE") for c in
                     ["HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_SEXUALLY_EXPLICIT",
                      "HARM_CATEGORY_DANGEROUS_CONTENT"]]
-        config = types.GenerateContentConfig(system_instruction=sys_inst, safety_settings=safeties,
-                                             temperature=temperature, top_p=top_p, top_k=top_k)
+
+        config_kwargs = {
+            "system_instruction": sys_inst,
+            "safety_settings": safeties,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k
+        }
+
+        # 通过 tools.py 获取规范化 JSON Schema 工具
+        if role_key:
+            tool = tools.get_tool_for_role(role_key, "Gemini")
+            if tool:
+                config_kwargs["tools"] = [tool]
+                config_kwargs["tool_config"] = types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(
+                        mode="ANY",  # 强制调用预设好的纯净提取方法
+                        allowed_function_names=[tools.TOOLS_CONFIG[role_key]["name"]]
+                    )
+                )
+
+        config = types.GenerateContentConfig(**config_kwargs)
 
         contents = [types.Content(role="user", parts=[types.Part.from_text(text="自我介绍一下。")]),
                     types.Content(role="model", parts=[types.Part.from_text(text=model_intro)])]
@@ -474,15 +491,33 @@ class LLMService:
                                  types.Part.from_text(text=f"下面是我之前已经完成的剧情：\n{history_text}")])])
         contents.append(types.Content(role="user", parts=[types.Part.from_text(text=final_prompt)]))
 
-        res = client.models.generate_content(model=model_name, contents=contents, config=config)
+        try:
+            res = client.models.generate_content(model=model_name, contents=contents, config=config)
+        except Exception as e:
+            # 万一底层模型不支持Tool回退到纯文本模式
+            if "tool" in str(e).lower() or "function" in str(e).lower():
+                config_kwargs.pop("tools", None)
+                config_kwargs.pop("tool_config", None)
+                config_fallback = types.GenerateContentConfig(**config_kwargs)
+                res = client.models.generate_content(model=model_name, contents=contents, config=config_fallback)
+            else:
+                raise e
+
         if not res.candidates: raise ValueError("API未返回候选结果")
+
+        # 拦截Tool解析成规范结构
+        if role_key:
+            result = tools.extract_tool_result(res, "Gemini", role_key)
+            if result is not None:
+                return result
+
         if res.candidates[0].finish_reason and "STOP" not in str(res.candidates[0].finish_reason):
             raise ValueError(f"生成异常终止: {res.candidates[0].finish_reason}")
         return res.text
 
     @staticmethod
     def call_openai(api_key, api_url, model_name, sys_inst, final_prompt, model_intro, pre_history, history_text,
-                    temperature, top_p):
+                    temperature, top_p, role_key=None):
         client = OpenAI(api_key=api_key, **({"base_url": api_url} if api_url else {}))
         msgs = [{"role": "system", "content": sys_inst}, {"role": "user", "content": "自我介绍一下。"},
                 {"role": "assistant", "content": model_intro}]
@@ -492,10 +527,37 @@ class LLMService:
             msgs.extend([{"role": "user", "content": "之前写了哪些剧情？"},
                          {"role": "assistant", "content": f"以下是我之前已经完成的剧情：\n{history_text}"}])
         msgs.append({"role": "user", "content": final_prompt})
-        return \
-            client.chat.completions.create(model=model_name, messages=msgs, temperature=temperature,
-                                           top_p=top_p).choices[
-                0].message.content
+
+        kwargs = {
+            "model": model_name,
+            "messages": msgs,
+            "temperature": temperature,
+            "top_p": top_p
+        }
+
+        if role_key:
+            tool = tools.get_tool_for_role(role_key, "OpenAI")
+            if tool:
+                kwargs["tools"] = [tool]
+                kwargs["tool_choice"] = {"type": "function", "function": {"name": tools.TOOLS_CONFIG[role_key]["name"]}}
+
+        try:
+            res = client.chat.completions.create(**kwargs)
+        except Exception as e:
+            # 若自建 API 不支持 Function Calling 会报错，在此做稳健回退
+            if "tool" in str(e).lower() or "function" in str(e).lower() or "schema" in str(e).lower():
+                kwargs.pop("tools", None)
+                kwargs.pop("tool_choice", None)
+                res = client.chat.completions.create(**kwargs)
+            else:
+                raise e
+
+        if role_key:
+            result = tools.extract_tool_result(res, "OpenAI", role_key)
+            if result is not None:
+                return result
+
+        return res.choices[0].message.content
 
 
 class APIKeyManager:
@@ -588,6 +650,12 @@ class AgentWorkflow:
 
         self.use_manual, self.manual_dict, self.max_manual_chapter = self.config.get("use_manual_outline", False), {}, 0
 
+        self.update_config(self.config)
+
+    def update_config(self, new_config):
+        """支持运行时动态更新设置，并重新计算目标章节"""
+        self.config = new_config
+        self.log("🔄 已实时更新系统配置。")
         try:
             self.target_chapter = int(self.config.get("target_chapter", 0) or 0)
         except (ValueError, TypeError):
@@ -599,13 +667,11 @@ class AgentWorkflow:
                     self.manual_dict[int(r[0])] = {"name": str(r[1]).strip(), "summary": str(r[2]).strip()}
             if self.manual_dict:
                 self.max_manual_chapter = max(self.manual_dict.keys())
-                self.log(f"✅ 人工大纲加载成功，目标完结章：第 {self.max_manual_chapter} 章")
-
                 if self.target_chapter <= 0:
                     self.target_chapter = self.max_manual_chapter
                 else:
                     self.target_chapter = min(max(self.current_chapter, self.target_chapter), self.max_manual_chapter)
-                self.log(f"🎯 设定当前生成目标至：第 {self.target_chapter} 章")
+                self.log(f"🎯 设定当前生成目标至：第 {self.target_chapter} 章 (人工大纲模式)")
         else:
             if self.target_chapter > 0:
                 self.log(f"🎯 设定当前生成目标至：第 {self.target_chapter} 章")
@@ -646,7 +712,7 @@ class AgentWorkflow:
 
     def _get_api_config(self, use_fallback, role=""):
         if use_fallback:
-            return {"model_name": self.config.get("fallback_api_model", "gemini-2.5-flash"),
+            return {"model_name": self.config.get("fallback_api_model", ""),
                     "api_type": self.config.get("fallback_api_type", "Gemini"),
                     "api_url": self.config.get("fallback_api_url", "").strip(),
                     "api_keys_str": self.config.get("fallback_api_keys", ""), "log_prefix": "【备用API】"}
@@ -654,19 +720,19 @@ class AgentWorkflow:
         b_role = role.split()[0].split('(')[0] if role else ""
         a_prefix = ROLE_MAP.get(b_role, "")
         if a_prefix and self.config.get(f"{a_prefix}_api_keys", "").strip():
-            return {"model_name": self.config.get(f"{a_prefix}_api_model", "gemini-2.5-flash"),
+            return {"model_name": self.config.get(f"{a_prefix}_api_model", ""),
                     "api_type": self.config.get(f"{a_prefix}_api_type", "Gemini"),
                     "api_url": self.config.get(f"{a_prefix}_api_url", "").strip(),
                     "api_keys_str": self.config.get(f"{a_prefix}_api_keys", ""), "log_prefix": f"【{b_role}专属】"}
 
-        return {"model_name": self.config.get("api_model", "gemini-2.5-flash"),
+        return {"model_name": self.config.get("api_model", ""),
                 "api_type": self.config.get("api_type", "Gemini"),
                 "api_url": self.config.get("api_url", "").strip(), "api_keys_str": self.config.get("api_keys", ""),
                 "log_prefix": ""}
 
     def _build_system_instructions(self, role):
         b_role = role.split()[0].split('(')[0]
-        is_tool = "清洗者" in role or "压缩者" in role or "归档者" in role
+        is_tool = "压缩者" in role or "归档者" in role
         a_prefix = ROLE_MAP.get(b_role, "")
         mode_file = get_dir("modes", self.config.get(f"{a_prefix}_mode", ""))
         mode_data = load_json(mode_file) if os.path.exists(mode_file) else {}
@@ -706,7 +772,10 @@ class AgentWorkflow:
         b_prompt = f"\n{global_p}\n\n【任务】：\n{prompt}" if global_p else prompt
         is_tool, sys_inst, model_intro, pre_history = self._build_system_instructions(role)
 
-        a_prefix = ROLE_MAP.get(role.split()[0].split('(')[0] if role else "", "")
+        b_role = role.split()[0].split('(')[0] if role else ""
+        en_role = ROLE_MAP.get(b_role, "")
+
+        a_prefix = ROLE_MAP.get(b_role, "")
         temperature, top_p, top_k = float(self.config.get(f"{a_prefix}_temperature", 0.7)), float(
             self.config.get(f"{a_prefix}_top_p", 0.9)), int(self.config.get(f"{a_prefix}_top_k", 40))
 
@@ -718,16 +787,24 @@ class AgentWorkflow:
                 curr_prompt = f"{'虚拟艺术创作。' * safety_blocks}\n{b_prompt}" if safety_blocks else b_prompt
 
                 api_key = self.key_manager.get_next_key(conf["api_keys_str"])
-                if conf["api_type"] == "Gemini":
-                    text = LLMService.call_gemini(api_key, conf["model_name"], sys_inst, curr_prompt, model_intro,
-                                                  pre_history, history_text, temperature, top_p, top_k)
-                else:
-                    text = LLMService.call_openai(api_key, conf["api_url"], conf["model_name"], sys_inst, curr_prompt,
-                                                  model_intro, pre_history, history_text, temperature, top_p)
 
-                if not text: raise ValueError("API返回空文本")
-                self.log(f"[{role}] 回复完成:\n{text[:50]}...\n" + "-" * 30)
-                return text + ("\n❤" if use_fallback else "")
+                if conf["api_type"] == "Gemini":
+                    result = LLMService.call_gemini(api_key, conf["model_name"], sys_inst, curr_prompt, model_intro,
+                                                    pre_history, history_text, temperature, top_p, top_k,
+                                                    role_key=en_role)
+                else:
+                    result = LLMService.call_openai(api_key, conf["api_url"], conf["model_name"], sys_inst, curr_prompt,
+                                                    model_intro, pre_history, history_text, temperature, top_p,
+                                                    role_key=en_role)
+
+                # 判断为空的宽容处理（应对Tool返回的字典或数字结果）
+                if result is None or (isinstance(result, str) and not result): raise ValueError("API返回空内容")
+                self.log(f"[{role}] 回复完成:\n{str(result)[:50]}...\n" + "-" * 30)
+
+                # 如果是字符串且触发了备用模型逻辑，才拼接心形图标
+                if use_fallback and isinstance(result, str):
+                    result += "\n❤"
+                return result
             except Exception as e:
                 self.log(f"[{role}] ❌ 异常: {e}")
                 self._save_error_log(role, conf, sys_inst, is_tool, model_intro, pre_history, curr_prompt, history_text,
@@ -746,8 +823,14 @@ class AgentWorkflow:
         return None
 
     def _extract_score(self, text):
-        match = re.search(r'(?:分数|Score|得分)[:：]?\s*(\d{1,3})', text or "", re.IGNORECASE) or re.search(
-            r'(?<!\d)(\d{1,3})(?!\d)', text or "")
+        # 兼容处理 Tools 模型直出的 Integer
+        if isinstance(text, int) or isinstance(text, float):
+            return int(text)
+        if isinstance(text, dict) and "score" in text:
+            return int(text["score"])
+
+        match = re.search(r'(?:分数|Score|得分)[:：]?\s*(\d{1,3})', str(text) or "", re.IGNORECASE) or re.search(
+            r'(?<!\d)(\d{1,3})(?!\d)', str(text) or "")
         return int(match.group(1)) if match else None
 
     def _execute_parallel(self, limit, count, func, args_gen):
@@ -758,7 +841,15 @@ class AgentWorkflow:
         if not candidates: return None, -1, 0
 
         # --- 人工评审环节逻辑 ---
-        if not self.config.get("use_ai_reviewer", True):
+        needs_manual = False
+        if "计划" in reviewer_role:
+            needs_manual = self.config.get("designer_use_manual_review", False)
+        elif "打分" in reviewer_role:
+            needs_manual = self.config.get("developer_use_manual_review", False)
+        elif "压缩" in reviewer_role:
+            needs_manual = self.config.get("compressor_use_manual_review", False)
+
+        if needs_manual:
             self.log(f"⏸ 触发人工评审环节 [{reviewer_role}] (共 {len(candidates)} 个候选方案等待确认)...")
             app_state.pending_candidates = candidates
             app_state.pending_review_type = reviewer_role
@@ -830,9 +921,10 @@ class AgentWorkflow:
         hist_ctx = self._build_dynamic_history(int(self.config.get("developer_full_ctx_count", 20))) if self.config.get(
             "developer_use_history", True) else ""
 
+        # 移除了原有的 <text> 包裹要求，底层 Function Calling 机制将直接获取结果
         chapters = self._execute_parallel(int(self.config.get("developer_count", 1)),
                                           int(self.config.get("developer_count", 1)), self.call_llm, lambda i: (
-                f"根据计划编写第{self.current_chapter}章正文(>2000字)，包裹在 <text> 和 </text> 内！\n：{self.best_plan}\n",
+                f"根据计划编写第{self.current_chapter}章正文(>2000字)。\n计划：{self.best_plan}\n",
                 f"开发者 {i + 1}", False, hist_ctx))
         if not chapters or not self.is_running: return False
 
@@ -849,19 +941,12 @@ class AgentWorkflow:
             j_hist = self._build_dynamic_history(int(self.config.get("judge_full_ctx_count", 0))) if self.config.get(
                 "judge_use_history", False) else ""
             if self._extract_score(self.call_llm(f"打分(0-100)\n{feedback}", "裁判者", False, j_hist)) >= 80:
-                best_chapter = self.call_llm(f"根据意见重修章节，包裹在 <text> 内！\n原：{best_chapter}\n意见：{feedback}",
+                best_chapter = self.call_llm(f"根据意见重修章节。\n原：{best_chapter}\n意见：{feedback}",
                                              f"开发者 {best_idx + 1}", False, hist_ctx)
 
-        if self.config.get("use_ai_cleaner", False):
-            c_hist = self._build_dynamic_history(int(self.config.get("cleaner_full_ctx_count", 0))) if self.config.get(
-                "cleaner_use_history", False) else ""
-            clean_chap = self.call_llm(f"提取纯净小说正文：\n\n{best_chapter}", "清洗者(正文)", False, c_hist)
-            final_text = clean_chap.strip() if clean_chap else best_chapter.strip()
-        else:
-            match = re.search(r'<text>(.*?)</text>', best_chapter, re.DOTALL | re.IGNORECASE)
-            final_text = match.group(1).strip() if match else re.sub(r'^(好的|明白|以下是).*?\n', '',
-                                                                     best_chapter).strip()
+        final_text = str(best_chapter).strip()
 
+        # 最后清理可能出现的章节标头等杂质
         final_text = re.sub(r'^\s*第[0-9一二三四五六七八九十百千万零〇]+[章节回].*?\n+', '', final_text).strip()
 
         if self.config.get("use_archiver", False):
@@ -870,7 +955,13 @@ class AgentWorkflow:
             archive_res = self.call_llm(
                 f"分析正文是否有人物变化，无则输出【无需更新】，有则在原有格式增补。\n设定：{self.current_characters}\n正文：{final_text}",
                 "归档者", False, a_hist)
-            if archive_res and "无需更新" not in archive_res:
+
+            # Archiver 是支持多字典返回属性的，此处原生解析
+            if isinstance(archive_res, dict):
+                if archive_res.get("status") == "需要更新" and archive_res.get("updated_characters"):
+                    self.current_characters = archive_res["updated_characters"]
+                    save_json(self.role_file, {"characters": self.current_characters})
+            elif isinstance(archive_res, str) and "无需更新" not in archive_res:
                 self.current_characters = re.sub(r'^(好的|明白|没问题|以下是).*?\n', '', archive_res,
                                                  flags=re.IGNORECASE).strip().removeprefix("```json").removeprefix(
                     "```").removesuffix("```").strip()
@@ -889,22 +980,17 @@ class AgentWorkflow:
             "compressor_use_history", False) else ""
         phint = f"主角是 {protagonist_name}，请用其真名。\n" if protagonist_name.strip() else ""
 
+        # 移除了原有 <summary> 的包裹要求
         summaries = self._execute_parallel(int(self.config.get("compressor_count", 1)),
                                            int(self.config.get("compressor_count", 1)), self.call_llm, lambda i: (
-                f"设定：{self.current_characters}\n{phint}提取主线，包裹在 <summary> 和 </summary> 内！\n正文：\n{text}",
+                f"设定：{self.current_characters}\n{phint}请提取剧情主线摘要。\n正文：\n{text}",
                 f"压缩者 {i + 1}", False, hist_ctx))
         if not summaries or not self.is_running: return None
 
         best_sum, _, _ = self._evaluate_candidates(summaries, "打分(0-100)\n摘要：{content}", "评审者(压缩)")
 
-        if self.config.get("use_ai_cleaner", False):
-            c_hist = self._build_dynamic_history(int(self.config.get("cleaner_full_ctx_count", 0))) if self.config.get(
-                "cleaner_use_history", False) else ""
-            clean_sum = self.call_llm(f"提取纯净剧情摘要：\n\n{best_sum}", "清洗者(摘要)", False, c_hist)
-            return clean_sum.strip() if clean_sum else best_sum.strip()
-
-        match = re.search(r'<summary>(.*?)</summary>', best_sum, re.DOTALL | re.IGNORECASE)
-        return match.group(1).strip() if match else re.sub(r'^(好的|明白|以下是).*?\n', '', best_sum).strip()
+        # Tools 直出的文本，不需要正则表达式拦截匹配
+        return str(best_sum).strip()
 
     def _step_compress_phase(self):
         if not (final_sum := self.compress_text(self.best_chapter)): return False
@@ -930,9 +1016,9 @@ class AgentWorkflow:
 
         hist_ctx = self._build_dynamic_history(int(self.config.get("designer_full_ctx_count", 0))) if self.config.get(
             "designer_use_history", True) else ""
-        if "已完结" in (self.call_llm(
+        if "已完结" in (str(self.call_llm(
                 f"当前摘要：{self.compressed_volume}。大纲：{self.config.get('outline', '')}。判断是否完结？只回答'已完结'或'未完结'。",
-                "设计者(完结)", False, hist_ctx) or ""):
+                "设计者(完结)", False, hist_ctx)) or ""):
             self.log("\n🎉 小说已完结！");
             self.is_running = False;
             return True

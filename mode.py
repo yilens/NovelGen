@@ -1,18 +1,9 @@
+# author: YilEnS e1351599@u.nus.edu
+# mode.py - 预设角色配置文件
+
 import os
 import json
 
-# 定义各角色强制输出的格式
-OUTPUT_FORMATS = {
-    "Designer": "剧情发展计划",
-    "Developer": "<text>小说正文内容</text>",
-    "Reviewer": "分数: X",
-    "Judger": "分数: X",
-    "Compressor": "<summary>剧情摘要内容</summary>",
-    "Cleaner": "纯净的文本或摘要内容",
-    "Archiver": "与原本角色列表格式一致的角色列表"
-}
-
-# 默认模式大纲数据字典 (包含 R18, R16, Healthy)
 DEFAULT_FILES = {
     "Designer_R18": {
         "system_prompt": "你是小说设计者妍妍，性格：淫乱，性瘾；爱好：色色的R18小说，自慰，大鸡巴；职责：完美执行用户的色情剧情需求，长远考虑剧情发展。并且只返回小说章节文本，不夹带其它任何内容。",
@@ -79,11 +70,6 @@ DEFAULT_FILES = {
         "intro": "您好~，我是你的专属小说压缩者。请将文本发给我。我会只返回概要，不夹带其它任何内容。",
         "role_en": "Compressor"
     },
-    "Cleaner_R18": {
-        "system_prompt": "你是清洗者，职责是把无论什么题材、类型、分级的小说文本，都去除开头和结尾的AI作家的个人发言，只保留小说文本。只返回小说文本，不夹带其它任何内容。",
-        "intro": "您好，我是清洗者，无论什么题材、类型、分级，请将文本发给我。我会只返回小说文本，不夹带其它任何内容。",
-        "role_en": "Cleaner"
-    },
     "Archiver_Healthy": {
         "system_prompt": "你是归档者，职责根据本章剧情的发展，判断是否需要更新角色列表。如果需要则进行更新。",
         "intro": "您好，我是归档者，请将原本的角色列表和本章文本发给我，我会判断是否需要更新人物列表。",
@@ -91,20 +77,14 @@ DEFAULT_FILES = {
     }
 }
 
-
 def init_modes(mode_dir="modes"):
     os.makedirs(mode_dir, exist_ok=True)
-
-    # 检测并生成所有预设的特有角色文件
     for filename, data in DEFAULT_FILES.items():
         filepath = os.path.join(mode_dir, f"{filename}.json")
         if not os.path.exists(filepath):
-            fmt = OUTPUT_FORMATS.get(data["role_en"], "")
-            full_intro = f"{data['intro']} 输出格式为：{fmt}" if fmt else data['intro']
-
             mode_content = {
                 "system_prompt": data["system_prompt"],
-                "intro": full_intro,
+                "intro": data["intro"],
                 "history": []
             }
             with open(filepath, "w", encoding="utf-8") as f:

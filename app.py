@@ -4,6 +4,7 @@
 import gradio as gr
 import threading, time, os
 import backend
+import tools  # 适配后端结构
 
 
 # ==========================================
@@ -88,8 +89,10 @@ def start_generation_ui(*args):
 
     backend.save_config_json(config)
     if backend.app_state.workflow and not backend.app_state.workflow.run_event.is_set():
+        # 如果当前有工作流挂起，则更新最新的配置并恢复
+        backend.app_state.workflow.update_config(config)
         backend.app_state.workflow.resume()
-        backend.app_state.log_callback("▶ 恢复生成...")
+        backend.app_state.log_callback("▶ 恢复生成 (已应用最新配置)...")
     else:
         backend.app_state.logs = []
         backend.app_state.workflow = backend.AgentWorkflow(config, backend.app_state.log_callback)
@@ -125,14 +128,20 @@ def start_generation_ui(*args):
         visible=False), gr.update(), gr.update(), gr.update()
 
 
-def toggle_pause_ui():
+def toggle_pause_ui(*args):
     if not backend.app_state.workflow: return "▶ 开始生成", "尚未启动工作流。"
     if backend.app_state.workflow.run_event.is_set():
         backend.app_state.workflow.pause()
         backend.app_state.log_callback("⏸ 暂停挂起...")
         return "▶ 继续", "已发送暂停指令"
+
+    # 如果是恢复操作，则应用最新的配置
+    config = backend.build_config_dict(*args)
+    backend.save_config_json(config)
+    backend.app_state.workflow.update_config(config)
+
     backend.app_state.workflow.resume()
-    backend.app_state.log_callback("▶ 恢复生成...")
+    backend.app_state.log_callback("▶ 恢复生成 (已应用最新配置)...")
     return "⏸ 暂停", "工作流已恢复"
 
 
@@ -189,8 +198,8 @@ def submit_manual_review(choice, text):
 # 前端 UI 构建逻辑
 # ==========================================
 def build_ui():
-    with gr.Blocks(title="VibeNoving v0.4.7 nightly test verion", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("## 📚 VibeNoving v0.4.7 nightly test verion")
+    with gr.Blocks(title="VibeNoving v0.4.8 nightly test verion", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("## 📚 VibeNoving v0.4.8 nightly test verion")
 
         with gr.Tabs():
             with gr.TabItem("✍️ 剧情与设定输入"):
@@ -286,7 +295,7 @@ def build_ui():
                                                     placeholder="输入 Key...")
                             with gr.Row():
                                 a_url = gr.Textbox(label="API URL (非Gemini必填)",
-                                                   placeholder="如https://integrate.api.nvidia.com/v1")
+                                                   placeholder="")
                                 a_model = gr.Dropdown(label="模型选择", allow_custom_value=True, interactive=True)
                                 btn_f = gr.Button("🔄 获取模型列表")
                             btn_f.click(fetch_models_ui, inputs=[a_type, a_url, a_keys],
@@ -304,9 +313,13 @@ def build_ui():
                         global_prompt = gr.Textbox(label="全局提示词(可传入世界观)")
                         custom_style_prompt = gr.Textbox(label="自定义风格")
                     with gr.Column(scale=1):
-                        use_ai_reviewer = gr.Checkbox(label="开启AI评审(如果不开的话，每章都由用户评审并修改)", value=True)
+                        designer_use_manual_review = gr.Checkbox(
+                            label="设计者开启用户评审&修改(如果不开的话，每章都由评审者评审)", value=False)
+                        developer_use_manual_review = gr.Checkbox(
+                            label="开发者开启用户评审&修改(如果不开的话，每章都由评审者评审)", value=False)
+                        compressor_use_manual_review = gr.Checkbox(
+                            label="压缩者开启用户评审&修改(如果不开的话，每章都由评审者评审)", value=False)
                         need_dev_revise = gr.Checkbox(label="开发者修改文本(暂不推荐开启)")
-                        use_ai_cleaner = gr.Checkbox(label="AI提取正文(暂不推荐开启)")
                         use_archiver = gr.Checkbox(label="归档者更新人物(暂不推荐开启)")
                         context_max_chars = gr.Number(label="前文最大截取字数(Agent读取的完整前文上限)", precision=0)
 
@@ -370,7 +383,8 @@ def build_ui():
         # 收集变量
         # ---------------------------
         base_inputs = [book_title, outline, style, characters, use_manual_outline, manual_outline_data, global_prompt,
-                       custom_style_prompt, use_ai_reviewer, need_dev_revise, use_ai_cleaner, use_archiver,
+                       custom_style_prompt, designer_use_manual_review, developer_use_manual_review,
+                       compressor_use_manual_review, need_dev_revise, use_archiver,
                        context_max_chars,
                        target_chapter,
                        api_type, api_keys, api_url, api_model, fallback_api_type, fallback_api_keys, fallback_api_url,
@@ -427,7 +441,8 @@ def build_ui():
 
         btn_start.click(start_generation_ui, inputs=all_inputs,
                         outputs=[log_output, btn_pause, review_panel, review_type_msg, review_choices, review_text])
-        btn_pause.click(toggle_pause_ui, inputs=[], outputs=[btn_pause, sys_msg])
+        # 传入所有输入到暂停按钮中，供恢复时动态读取
+        btn_pause.click(toggle_pause_ui, inputs=all_inputs, outputs=[btn_pause, sys_msg])
 
         # 人工评审相关事件绑定
         review_choices.change(on_review_choice_change, inputs=[review_choices], outputs=[review_text])
