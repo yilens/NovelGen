@@ -137,12 +137,10 @@ def extract_tool_result(response_obj, api_type, role_key):
             pass
 
     if extracted_args is not None:
-        # 如果只需要单个返回值（正文、摘要等），直接解包出来
         if len(config["required"]) == 1:
             key = config["required"][0]
             if key in extracted_args:
                 return extracted_args[key]
-        # 否则原样返回字典（供 Archiver 处理多字段）
         return extracted_args
 
     return None

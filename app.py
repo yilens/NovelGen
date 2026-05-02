@@ -4,12 +4,9 @@
 import gradio as gr
 import threading, time, os
 import backend
-import tools  # 适配后端结构
+import api  # 引入新的 API 网络层
+import tools
 
-
-# ==========================================
-# 前端包装与状态映射方法 (UI Wrappers)
-# ==========================================
 
 def update_choices(items):
     return gr.update(choices=items, value=items[0] if items else None)
@@ -33,16 +30,6 @@ def save_mode_ui(mode_name, sys_prompt, intro, history_data):
     return [msg] + updates
 
 
-def export_book_folder_ui(title):
-    path, msg = backend.FileManager.export_book_folder(title)
-    return gr.update(value=path, visible=bool(path)), msg
-
-
-def delete_book_ui(title):
-    msg, new_books = backend.FileManager.delete_book(title)
-    return msg, update_choices(new_books)
-
-
 def load_book_config_ui(raw_title):
     if not raw_title: return gr.update(), gr.update(), gr.update(), "⚠️ 请输入书名"
     conf = backend.load_json(backend.get_dir("Books", backend.safe_name(raw_title.strip()), "book_config.json"))
@@ -53,7 +40,8 @@ def load_book_config_ui(raw_title):
 
 
 def fetch_models_ui(api_type, url_str, keys_str):
-    models, msg = backend.fetch_models(api_type, url_str, keys_str)
+    # 此处改为调用 api.py 中的 fetch_models 方法
+    models, msg = api.fetch_models(api_type, url_str, keys_str)
     if models: return gr.update(choices=models, value=models[0]), msg
     return gr.update(), msg
 
@@ -89,7 +77,6 @@ def start_generation_ui(*args):
 
     backend.save_config_json(config)
     if backend.app_state.workflow and not backend.app_state.workflow.run_event.is_set():
-        # 如果当前有工作流挂起，则更新最新的配置并恢复
         backend.app_state.workflow.update_config(config)
         backend.app_state.workflow.resume()
         backend.app_state.log_callback("▶ 恢复生成 (已应用最新配置)...")
@@ -202,7 +189,7 @@ def submit_manual_retry():
     return gr.update(visible=False), "🔄 正在重新生成当前环节候选，请稍候..."
 
 
-# VibeNoving 局部生成交互逻辑 (评审面板)
+# 局部重写 局部生成交互逻辑 (评审面板)
 def run_vibe_review(current_text, selected_text, prompt, *config_args):
     config = backend.build_config_dict(*config_args)
     title = backend.app_state.workflow.book_title if backend.app_state.workflow else config.get("book_title", "")
@@ -210,13 +197,13 @@ def run_vibe_review(current_text, selected_text, prompt, *config_args):
     return backend.EditManager.run_vibenoving(title, f"第{ch_num}章", current_text, selected_text, prompt, config)
 
 
-# VibeNoving 局部生成交互逻辑 (修改面板)
+# 局部重写 局部生成交互逻辑 (修改面板)
 def run_vibe_edit(book_sel, ch_sel, current_text, selected_text, prompt, *config_args):
     config = backend.build_config_dict(*config_args)
     return backend.EditManager.run_vibenoving(book_sel, ch_sel, current_text, selected_text, prompt, config)
 
 
-# VibeNoving 应用替换逻辑
+# 局部重写 应用替换逻辑
 def apply_vibe(full_text, selected_text, new_text):
     if not selected_text or not new_text or "❌" in new_text:
         return full_text
@@ -227,12 +214,14 @@ def apply_vibe(full_text, selected_text, new_text):
     return full_text
 
 
-# ==========================================
-# 前端 UI 构建逻辑
-# ==========================================
 def build_ui():
-    with gr.Blocks(title="VibeNoving v0.4.9 nightly test version", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("## 📚 VibeNoving v0.4.9 nightly test version")
+    custom_css = """
+    .tall-btn {
+        height: 72px !important;
+    }
+    """
+    with gr.Blocks(title="VibeNoving v0.5.0 nightly test version", theme=gr.themes.Soft(), css=custom_css) as demo:
+        gr.Markdown("## 📚 VibeNoving v0.5.0 nightly test version")
 
         with gr.Tabs():
             with gr.TabItem("✍️ 剧情与设定输入"):
@@ -240,15 +229,16 @@ def build_ui():
                     book_title = gr.Textbox(label="书名 (必选)", scale=4)
                     btn_load_book = gr.Button("📂 加载该书历史设定", scale=1)
                 load_book_msg = gr.Markdown("")
+
                 with gr.Row():
-                    outline = gr.Textbox(label="剧情总大纲", lines=5)
-                    btn_outline = gr.UploadButton("上传", file_types=[".txt"])
+                    outline = gr.Textbox(label="剧情总大纲", lines=5, scale=5)
+                    btn_outline = gr.UploadButton("📄 上传TXT", file_types=[".txt"], scale=1, size="sm")
                 with gr.Row():
-                    style = gr.Textbox(label="剧情风格 (可选)", lines=3)
-                    btn_style = gr.UploadButton("上传", file_types=[".txt"])
+                    style = gr.Textbox(label="剧情风格 (可选)", lines=3, scale=5)
+                    btn_style = gr.UploadButton("📄 上传TXT", file_types=[".txt"], scale=1, size="sm")
                 with gr.Row():
-                    characters = gr.Textbox(label="人物列表 (可选)", lines=3)
-                    btn_char = gr.UploadButton("上传", file_types=[".txt"])
+                    characters = gr.Textbox(label="人物列表 (可选)", lines=3, scale=5)
+                    btn_char = gr.UploadButton("📄 上传TXT", file_types=[".txt"], scale=1, size="sm")
 
                 for btn, comp in [(btn_outline, outline), (btn_style, style), (btn_char, characters)]:
                     btn.upload(lambda f: backend.read_file(f.name) if f else "", inputs=[btn], outputs=[comp])
@@ -278,15 +268,6 @@ def build_ui():
                                                        row_count=(1, "dynamic"), interactive=True, type="array")
                     btn_add_manual_row = gr.Button("➕ 新增一章大纲", size="sm")
 
-            with gr.TabItem("📥 导入半成品小说"):
-                gr.Markdown("### 📥 仅支持章节名为 第x章的小说")
-                with gr.Row():
-                    import_file = gr.File(label="上传 .txt 小说文件", file_types=[".txt"])
-                    import_title = gr.Textbox(label="设定书名(上传后自动提取或手动输入)")
-                import_protagonist = gr.Textbox(label="主角姓名(可选，用于第一人称小说，不然AI不知道主角的名字)")
-                import_btn = gr.Button("🚀 开始处理", variant="primary")
-                import_status = gr.Textbox(label="导入进度状态", lines=5)
-
             with gr.TabItem("🤖 Agent 独立配置"):
                 agent_inputs_dict = {}
                 with gr.Accordion("➕ 新建Agent预设", open=False):
@@ -304,33 +285,34 @@ def build_ui():
                         with gr.TabItem(f"{zh} ({en})"):
                             agent_prompt = gr.Textbox(label=f"{zh} 专属额外提示词", lines=2)
                             with gr.Row():
-                                agent_mode, agent_count = gr.Dropdown(label=f"加载配置", choices=[]), gr.Number(
-                                    label=f"并发数", precision=0)
+                                with gr.Column(scale=1):
+                                    with gr.Row():
+                                        agent_mode = gr.Dropdown(label=f"加载配置", choices=[])
+                                        agent_count = gr.Number(label=f"并发数", precision=0)
+                                    with gr.Row():
+                                        agent_use_history = gr.Checkbox(label="读取前文",
+                                                                        value=(en in ["designer", "developer"]))
+                                        agent_full_ctx_count = gr.Number(label="完整章数",
+                                                                         value=(20 if en == "developer" else 0),
+                                                                         precision=0)
+                                    with gr.Row():
+                                        agent_temp = gr.Slider(0.0, 2.0, step=0.1, label="Temp")
+                                        agent_topp = gr.Slider(0.0, 1.0, step=0.05, label="Top P")
+                                        agent_topk = gr.Slider(1, 100, step=1, label="Top K")
 
-                            gr.Markdown("读取前文策略")
-                            with gr.Row():
-                                agent_use_history = gr.Checkbox(label="读取前文",
-                                                                value=(en in ["designer", "developer"]))
-                                agent_full_ctx_count = gr.Number(label="完整章数",
-                                                                 value=(20 if en == "developer" else 0), precision=0)
+                                with gr.Column(scale=1):
+                                    with gr.Row():
+                                        a_type = gr.Dropdown(["Gemini", "OpenAI Compatible"],
+                                                             label="独立 API (留空默认使用全局Api)")
+                                        a_keys = gr.Textbox(label="API Keys(逗号隔开)", type="password",
+                                                            placeholder="输入 Key...")
+                                    with gr.Row():
+                                        a_url = gr.Textbox(label="API URL (非Gemini必填)", placeholder="")
+                                        a_model = gr.Dropdown(label="模型选择", allow_custom_value=True,
+                                                              interactive=True)
+                                    with gr.Row():
+                                        btn_f = gr.Button("🔄 获取模型列表", elem_classes="tall-btn")
 
-                            with gr.Row():
-                                agent_temp, agent_topp, agent_topk = gr.Slider(0.0, 2.0, step=0.1,
-                                                                               label="Temp"), gr.Slider(0.0, 1.0,
-                                                                                                        step=0.05,
-                                                                                                        label="Top P"), gr.Slider(
-                                    1, 100, step=1, label="Top K")
-
-                            gr.Markdown("独立 API (留空默认使用全局Api)")
-                            with gr.Row():
-                                a_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="API 类型")
-                                a_keys = gr.Textbox(label="API Keys(逗号隔开)", type="password",
-                                                    placeholder="输入 Key...")
-                            with gr.Row():
-                                a_url = gr.Textbox(label="API URL (非Gemini必填)",
-                                                   placeholder="")
-                                a_model = gr.Dropdown(label="模型选择", allow_custom_value=True, interactive=True)
-                                btn_f = gr.Button("🔄 获取模型列表")
                             btn_f.click(fetch_models_ui, inputs=[a_type, a_url, a_keys],
                                         outputs=[a_model, api_status_agent])
                             agent_inputs_dict[en] = {"mode": agent_mode, "prompt": agent_prompt, "count": agent_count,
@@ -343,8 +325,8 @@ def build_ui():
             with gr.TabItem("⚙️ 基础&全局API配置"):
                 with gr.Row():
                     with gr.Column(scale=2):
-                        global_prompt = gr.Textbox(label="全局提示词(可传入世界观)")
-                        custom_style_prompt = gr.Textbox(label="自定义风格")
+                        global_prompt = gr.Textbox(label="全局提示词(对所有Agent都生效,可传入世界观)", lines=6)
+                        custom_style_prompt = gr.Textbox(label="自定义风格", lines=6)
                     with gr.Column(scale=1):
                         designer_use_manual_review = gr.Checkbox(
                             label="设计者开启用户评审&修改(如果不开的话，每章都由评审者评审)", value=False)
@@ -355,31 +337,35 @@ def build_ui():
                         need_dev_revise = gr.Checkbox(label="开发者修改文本(暂不推荐开启)")
                         use_archiver = gr.Checkbox(label="归档者更新人物(暂不推荐开启)")
                         context_max_chars = gr.Number(label="前文最大截取字数(Agent读取的完整前文上限)", precision=0)
-                        vibenoving_context_count = gr.Number(label="VibeNoving前文参考章数(推荐5)", value=5,
+                        vibenoving_context_count = gr.Number(label="局部重写前文参考章数(推荐5)", value=5,
                                                              precision=0)
 
                 api_status_main = gr.Textbox(label="全局API获取状态", interactive=False)
-                gr.Markdown("### 【主 API 配置】")
                 with gr.Row():
-                    api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="主 API 类型")
-                    api_keys = gr.Textbox(label="主 API Keys", type="password")
-                with gr.Row():
-                    api_url, api_model, btn_f_main = gr.Textbox(label="主 API URL"), gr.Dropdown(label="主模型选择",
-                                                                                                 allow_custom_value=True), gr.Button(
-                        "🔄 获取主模型")
-                btn_f_main.click(fetch_models_ui, inputs=[api_type, api_url, api_keys],
-                                 outputs=[api_model, api_status_main])
+                    with gr.Column():
+                        gr.Markdown("### 【主 API 配置】")
+                        with gr.Row():
+                            api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="主 API 类型")
+                            api_keys = gr.Textbox(label="主 API Keys", type="password")
+                        with gr.Row():
+                            api_url = gr.Textbox(label="主 API URL")
+                            api_model = gr.Dropdown(label="主模型选择", allow_custom_value=True)
+                            btn_f_main = gr.Button("🔄 获取主模型")
+                        btn_f_main.click(fetch_models_ui, inputs=[api_type, api_url, api_keys],
+                                         outputs=[api_model, api_status_main])
 
-                gr.Markdown("### 【备用 API 配置】")
-                with gr.Row():
-                    fallback_api_type, fallback_api_keys = gr.Dropdown(["Gemini", "OpenAI Compatible"],
-                                                                       label="备用 API 类型"), gr.Textbox(
-                        label="备用 API Keys", type="password")
-                with gr.Row():
-                    fallback_api_url, fallback_api_model, btn_f_fall = gr.Textbox(label="备用 API URL"), gr.Dropdown(
-                        label="备用模型选择", allow_custom_value=True), gr.Button("🔄 获取备用模型")
-                btn_f_fall.click(fetch_models_ui, inputs=[fallback_api_type, fallback_api_url, fallback_api_keys],
-                                 outputs=[fallback_api_model, api_status_main])
+                    with gr.Column():
+                        gr.Markdown("### 【备用 API 配置】")
+                        with gr.Row():
+                            fallback_api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="备用 API 类型")
+                            fallback_api_keys = gr.Textbox(label="备用 API Keys", type="password")
+                        with gr.Row():
+                            fallback_api_url = gr.Textbox(label="备用 API URL")
+                            fallback_api_model = gr.Dropdown(label="备用模型选择", allow_custom_value=True)
+                            btn_f_fall = gr.Button("🔄 获取备用模型")
+                        btn_f_fall.click(fetch_models_ui,
+                                         inputs=[fallback_api_type, fallback_api_url, fallback_api_keys],
+                                         outputs=[fallback_api_model, api_status_main])
 
             with gr.TabItem("💻 控制台 & 日志"):
                 with gr.Row():
@@ -400,7 +386,7 @@ def build_ui():
                         btn_review_retry = gr.Button("🔄 不满意？重试本环节", variant="stop")
                     review_text = gr.Textbox(label="在此编辑您最喜欢的内容，它将被采用", lines=15)
 
-                    with gr.Accordion("✨ VibeNoving (局部细节重写)", open=False):
+                    with gr.Accordion("局部重写", open=False):
                         gr.Markdown("觉得某段写得不够好？复制那段文本，让AI根据前文和你的要求专门重写！")
                         with gr.Row():
                             vibe_selected = gr.Textbox(label="选中的待修改片段 (请从上方文本框中复制过来)", lines=3)
@@ -412,9 +398,8 @@ def build_ui():
             with gr.TabItem("📁 文件与章节管理"):
                 btn_refresh, book_select = gr.Button("🔄 刷新"), gr.Dropdown(label="小说")
                 with gr.Row():
-                    btn_download, btn_delete = gr.Button("📦 下载", variant="primary"), gr.Button("🗑️ 删除",
-                                                                                                 variant="stop")
-                fm_msg, fm_file = gr.Textbox(label="状态"), gr.File(label="下载", visible=False)
+                    btn_open_folder = gr.Button("📂 打开本地小说保存文件夹", variant="primary")
+                fm_msg = gr.Textbox(label="状态")
 
                 gr.Markdown("--- \n ### 📝 本地章节内容覆写")
                 with gr.Row():
@@ -423,8 +408,8 @@ def build_ui():
                 with gr.Row():
                     edit_ch_cont, edit_ch_sum = gr.Textbox(label="正文", lines=10), gr.Textbox(label="摘要", lines=10)
 
-                with gr.Accordion("✨ VibeNoving (局部细节重写)", open=False):
-                    gr.Markdown("选中正文下方需要重写的一小段文本，输入要求，让AI专门修改这段！")
+                with gr.Accordion("局部重写", open=False):
+                    gr.Markdown("选中正文下方需要重写的一小段文本，输入要求，让AI专门修改这段。")
                     with gr.Row():
                         vibe_edit_selected = gr.Textbox(label="选中的待修改片段 (请从上方正文中复制过来)", lines=3)
                         vibe_edit_prompt = gr.Textbox(label="修改方向 (如：加入环境描写、增加动作细节)", lines=3)
@@ -434,6 +419,15 @@ def build_ui():
 
                 btn_save_ch = gr.Button("💾 保存修改并触发AI重新压缩", variant="primary")
 
+            with gr.TabItem("📥 导入半成品小说"):
+                gr.Markdown("### 📥 仅支持章节名为 第x章的小说")
+                with gr.Row():
+                    import_file = gr.File(label="上传 .txt 小说文件", file_types=[".txt"])
+                    with gr.Column():
+                        import_title = gr.Textbox(label="设定书名(上传后自动提取或手动输入)")
+                        import_protagonist = gr.Textbox(label="主角姓名(可选，用于第一人称小说，不然AI不知道主角的名字)")
+                        import_btn = gr.Button("🚀 开始处理", variant="primary")
+                import_status = gr.Textbox(label="导入进度状态", lines=5)
         # ---------------------------
         # 收集变量 (与BASE_CONFIG_KEYS完全一致顺序)
         # ---------------------------
@@ -504,7 +498,7 @@ def build_ui():
                                 outputs=[review_panel, sys_msg])
         btn_review_retry.click(submit_manual_retry, inputs=[], outputs=[review_panel, sys_msg])
 
-        # VibeNoving 事件绑定
+        # 局部重写 事件绑定
         btn_vibe_gen.click(run_vibe_review, inputs=[review_text, vibe_selected, vibe_prompt] + all_inputs,
                            outputs=[vibe_result])
         btn_vibe_apply.click(apply_vibe, inputs=[review_text, vibe_selected, vibe_result], outputs=[review_text])
@@ -515,8 +509,7 @@ def build_ui():
                                   outputs=[edit_ch_cont])
 
         btn_refresh.click(get_books_ui, inputs=[], outputs=[book_select])
-        btn_download.click(export_book_folder_ui, inputs=[book_select], outputs=[fm_file, fm_msg])
-        btn_delete.click(delete_book_ui, inputs=[book_select], outputs=[fm_msg, book_select])
+        btn_open_folder.click(backend.FileManager.open_books_folder, inputs=[], outputs=[fm_msg])
 
         import_file.upload(lambda f: os.path.splitext(os.path.basename(f.name))[0] if f else "", inputs=[import_file],
                            outputs=[import_title])

@@ -1,13 +1,11 @@
 # author: YilEnS e1351599@u.nus.edu
 # backend.py - 后端核心逻辑层
 
-import json, os, re, urllib.request, urllib.error, time, random, shutil, threading
+import json, os, re, time, shutil, threading, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
-from google import genai
-from google.genai import types
-from openai import OpenAI
-import mode
-import tools  # 引入新定义的工具层
+import mode   # Agent配置文件
+import tools  # 工具层
+import api    # API网络层
 
 # ==========================================
 # 常量配置与全局初始化
@@ -204,26 +202,19 @@ class FileManager:
                 os.path.isdir(os.path.join(user_dir, d)) and d not in ["mode", "modes", "outline", "roles"]]
 
     @staticmethod
-    def export_book_folder(raw_title):
-        if not raw_title: return None, "❌ 缺少书名信息"
-        book_title, book_dir = safe_name(raw_title), get_dir("Books", safe_name(raw_title))
-        if not os.path.exists(book_dir): return None, f"❌ 找不到对应文件夹"
-
-        zip_base_path = get_dir("Books", f"{book_title}_完整包")
-        shutil.make_archive(zip_base_path, 'zip', book_dir)
-        return f"{zip_base_path}.zip", f"✅ 已打包 {book_title}，请点击下载。"
-
-    @staticmethod
-    def delete_book(raw_title):
-        if not raw_title: return "❌ 缺少书名信息", []
-        book_title = safe_name(raw_title)
-        book_dir = get_dir("Books", book_title)
-        if os.path.exists(book_dir):
-            shutil.rmtree(book_dir)
-            zip_file = get_dir("Books", f"{book_title}_完整包.zip")
-            if os.path.exists(zip_file): os.remove(zip_file)
-            return f"✅ 成功删除小说: {book_title}", FileManager.get_books()
-        return "❌ 找不到指定小说的文件夹", FileManager.get_books()
+    def open_books_folder():
+        folder_path = os.path.abspath(get_dir("Books"))
+        os.makedirs(folder_path, exist_ok=True)
+        try:
+            if sys.platform == "win32":
+                os.startfile(folder_path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder_path])
+            else:
+                subprocess.Popen(["xdg-open", folder_path])
+            return f"✅ 已在本地文件管理器中打开文件夹: {folder_path}"
+        except Exception as e:
+            return f"❌ 无法打开文件夹: {e}"
 
     @staticmethod
     def _get_list(subdir):
@@ -265,7 +256,7 @@ class ImportManager:
         m = re.search(r'第([零一二三四五六七八九十百千万〇]+)[章节回]', title_str)
         if m:
             cn_num = m.group(1)
-            cn2arb = {'零': 0, '〇': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+            cn2arb = {'零': 0, '〇': 0, '一': 1, '两': 2, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
             result, temp = 0, 0
             for char in cn_num:
                 if char in cn2arb:
@@ -485,172 +476,17 @@ class EditManager:
             return "❌ 未配置全局 API Key，请在设置中配置。"
 
         try:
-            km = APIKeyManager()
+            km = api.APIKeyManager()
             api_key = km.get_next_key(api_keys)
             if api_type == "Gemini":
-                res = LLMService.call_gemini(api_key, api_model, sys_prompt, llm_prompt,
+                res = api.LLMService.call_gemini(api_key, api_model, sys_prompt, llm_prompt,
                                              "收到，我将仅返回修改后的文本段落。", [], "", 0.7, 0.9, 40)
             else:
-                res = LLMService.call_openai(api_key, api_url, api_model, sys_prompt, llm_prompt,
+                res = api.LLMService.call_openai(api_key, api_url, api_model, sys_prompt, llm_prompt,
                                              "收到，我将仅返回修改后的文本段落。", [], "", 0.7, 0.9)
             return str(res).strip()
         except Exception as e:
             return f"❌ VibeNoving 生成失败: {e}"
-
-
-# ==========================================
-# API 客户端服务层
-# ==========================================
-class LLMService:
-    @staticmethod
-    def call_gemini(api_key, model_name, sys_inst, final_prompt, model_intro, pre_history, history_text, temperature,
-                    top_p, top_k, role_key=None):
-        client = genai.Client(api_key=api_key)
-        safeties = [types.SafetySetting(category=c, threshold="BLOCK_NONE") for c in
-                    ["HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                     "HARM_CATEGORY_DANGEROUS_CONTENT"]]
-
-        config_kwargs = {
-            "system_instruction": sys_inst,
-            "safety_settings": safeties,
-            "temperature": temperature,
-            "top_p": top_p,
-            "top_k": top_k
-        }
-
-        # 通过 tools.py 获取规范化 JSON Schema 工具
-        if role_key:
-            tool = tools.get_tool_for_role(role_key, "Gemini")
-            if tool:
-                config_kwargs["tools"] = [tool]
-                config_kwargs["tool_config"] = types.ToolConfig(
-                    function_calling_config=types.FunctionCallingConfig(
-                        mode="ANY",  # 强制调用预设好的纯净提取方法
-                        allowed_function_names=[tools.TOOLS_CONFIG[role_key]["name"]]
-                    )
-                )
-
-        config = types.GenerateContentConfig(**config_kwargs)
-
-        contents = [types.Content(role="user", parts=[types.Part.from_text(text="自我介绍一下。")]),
-                    types.Content(role="model", parts=[types.Part.from_text(text=model_intro)])]
-        for turn in (pre_history or []):
-            contents.extend([types.Content(role="user", parts=[types.Part.from_text(text=turn["user"])]),
-                             types.Content(role="model", parts=[types.Part.from_text(text=turn["model"])])])
-        if history_text and history_text.strip():
-            contents.extend([types.Content(role="user", parts=[types.Part.from_text(text="回顾一下之前的剧情。")]),
-                             types.Content(role="model", parts=[
-                                 types.Part.from_text(text=f"下面是我之前已经完成的剧情：\n{history_text}")])])
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=final_prompt)]))
-
-        try:
-            res = client.models.generate_content(model=model_name, contents=contents, config=config)
-        except Exception as e:
-            # 万一底层模型不支持Tool回退到纯文本模式
-            if "tool" in str(e).lower() or "function" in str(e).lower():
-                config_kwargs.pop("tools", None)
-                config_kwargs.pop("tool_config", None)
-                config_fallback = types.GenerateContentConfig(**config_kwargs)
-                res = client.models.generate_content(model=model_name, contents=contents, config=config_fallback)
-            else:
-                raise e
-
-        if not res.candidates: raise ValueError("API未返回候选结果")
-
-        # 拦截Tool解析成规范结构
-        if role_key:
-            result = tools.extract_tool_result(res, "Gemini", role_key)
-            if result is not None:
-                return result
-
-        if res.candidates[0].finish_reason and "STOP" not in str(res.candidates[0].finish_reason):
-            raise ValueError(f"生成异常终止: {res.candidates[0].finish_reason}")
-        return res.text
-
-    @staticmethod
-    def call_openai(api_key, api_url, model_name, sys_inst, final_prompt, model_intro, pre_history, history_text,
-                    temperature, top_p, role_key=None):
-        client = OpenAI(api_key=api_key, **({"base_url": api_url} if api_url else {}))
-        msgs = [{"role": "system", "content": sys_inst}, {"role": "user", "content": "自我介绍一下。"},
-                {"role": "assistant", "content": model_intro}]
-        for t in (pre_history or []):
-            msgs.extend([{"role": "user", "content": t["user"]}, {"role": "assistant", "content": t["model"]}])
-        if history_text and history_text.strip():
-            msgs.extend([{"role": "user", "content": "之前写了哪些剧情？"},
-                         {"role": "assistant", "content": f"以下是我之前已经完成的剧情：\n{history_text}"}])
-        msgs.append({"role": "user", "content": final_prompt})
-
-        kwargs = {
-            "model": model_name,
-            "messages": msgs,
-            "temperature": temperature,
-            "top_p": top_p
-        }
-
-        if role_key:
-            tool = tools.get_tool_for_role(role_key, "OpenAI")
-            if tool:
-                kwargs["tools"] = [tool]
-                kwargs["tool_choice"] = {"type": "function", "function": {"name": tools.TOOLS_CONFIG[role_key]["name"]}}
-
-        try:
-            res = client.chat.completions.create(**kwargs)
-        except Exception as e:
-            # 若自建 API 不支持 Function Calling 会报错，在此做稳健回退
-            if "tool" in str(e).lower() or "function" in str(e).lower() or "schema" in str(e).lower():
-                kwargs.pop("tools", None)
-                kwargs.pop("tool_choice", None)
-                res = client.chat.completions.create(**kwargs)
-            else:
-                raise e
-
-        if role_key:
-            result = tools.extract_tool_result(res, "OpenAI", role_key)
-            if result is not None:
-                return result
-
-        return res.choices[0].message.content
-
-
-class APIKeyManager:
-    def __init__(self):
-        self.indices, self.lock = {}, threading.Lock()
-
-    def get_next_key(self, keys_str):
-        keys = [k.strip() for k in keys_str.split(",") if k.strip()]
-        if not keys: raise ValueError("未配置 API Keys")
-        with self.lock:
-            idx = self.indices.get(keys_str, 0)
-            self.indices[keys_str] = idx + 1
-            return keys[idx % len(keys)]
-
-
-def fetch_models(api_type, url_str, keys_str):
-    if not keys_str: return [], "❌ 请先填入 API Key"
-    api_key = keys_str.split(',')[0].strip()
-    try:
-        if api_type == "Gemini":
-            client = genai.Client(api_key=api_key)
-            models = [m.name.replace('models/', '') for m in client.models.list()]
-        else:
-            base_url = url_str.rstrip('/')
-            headers = {"Authorization": f"Bearer {api_key}"}
-            try:
-                with urllib.request.urlopen(urllib.request.Request(f"{base_url}/models", headers=headers),
-                                            timeout=10) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
-            except urllib.error.HTTPError as e:
-                if e.code == 404 and not base_url.endswith('/v1'):
-                    with urllib.request.urlopen(urllib.request.Request(f"{base_url}/v1/models", headers=headers),
-                                                timeout=10) as resp:
-                        data = json.loads(resp.read().decode('utf-8'))
-                else:
-                    raise e
-            models = [m['id'] for m in data.get('data', []) if 'id' in m]
-        if not models: return [], "⚠️ 返回空模型列表"
-        return models, f"✅ 获取 {len(models)} 个可用模型"
-    except Exception as e:
-        return [], f"❌ 获取失败:\n{e}"
 
 
 # ==========================================
@@ -659,7 +495,7 @@ def fetch_models(api_type, url_str, keys_str):
 class AgentWorkflow:
     def __init__(self, config, log_callback):
         self.config, self.log = config, log_callback
-        self.key_manager = APIKeyManager()
+        self.key_manager = api.APIKeyManager()
         self.run_event = threading.Event()
         self.run_event.set()
 
@@ -841,11 +677,11 @@ class AgentWorkflow:
                 api_key = self.key_manager.get_next_key(conf["api_keys_str"])
 
                 if conf["api_type"] == "Gemini":
-                    result = LLMService.call_gemini(api_key, conf["model_name"], sys_inst, curr_prompt, model_intro,
+                    result = api.LLMService.call_gemini(api_key, conf["model_name"], sys_inst, curr_prompt, model_intro,
                                                     pre_history, history_text, temperature, top_p, top_k,
                                                     role_key=en_role)
                 else:
-                    result = LLMService.call_openai(api_key, conf["api_url"], conf["model_name"], sys_inst, curr_prompt,
+                    result = api.LLMService.call_openai(api_key, conf["api_url"], conf["model_name"], sys_inst, curr_prompt,
                                                     model_intro, pre_history, history_text, temperature, top_p,
                                                     role_key=en_role)
 
@@ -876,13 +712,13 @@ class AgentWorkflow:
 
     def _extract_score(self, text):
         # 兼容处理 Tools 模型直出的 Integer
-        if isinstance(text, int) or isinstance(text, float):
+        if isinstance(text, (int, float)):
             return int(text)
         if isinstance(text, dict) and "score" in text:
             return int(text["score"])
-
-        match = re.search(r'(?:分数|Score|得分)[:：]?\s*(\d{1,3})', str(text) or "", re.IGNORECASE) or re.search(
-            r'(?<!\d)(\d{1,3})(?!\d)', str(text) or "")
+        text_str = str(text)
+        match = re.search(r'(?:分数|Score|得分)[:：]?\s*(\d{1,3})', text_str, re.IGNORECASE) or \
+                re.search(r'(?<!\d)(\d{1,3})(?!\d)', text_str)
         return int(match.group(1)) if match else None
 
     def _execute_parallel(self, limit, count, func, args_gen):
@@ -1012,9 +848,6 @@ class AgentWorkflow:
 
         final_text = str(best_chapter).strip()
 
-        # 最后清理可能出现的章节标头等杂质
-        final_text = re.sub(r'^\s*第[0-9一二三四五六七八九十百千万零〇]+[章节回].*?\n+', '', final_text).strip()
-
         if self.config.get("use_archiver", False):
             a_hist = self._build_dynamic_history(int(self.config.get("archiver_full_ctx_count", 0))) if self.config.get(
                 "archiver_use_history", False) else ""
@@ -1022,16 +855,15 @@ class AgentWorkflow:
                 f"分析正文是否有人物变化，无则输出【无需更新】，有则在原有格式增补。\n设定：{self.current_characters}\n正文：{final_text}",
                 "归档者", False, a_hist)
 
-            # Archiver 是支持多字典返回属性的，此处原生解析
             if isinstance(archive_res, dict):
-                if archive_res.get("status") == "需要更新" and archive_res.get("updated_characters"):
+                if archive_res.get("status") in ["需要更新", "更新", "有变化"] and archive_res.get("updated_characters"):
                     self.current_characters = archive_res["updated_characters"]
                     save_json(self.role_file, {"characters": self.current_characters})
             elif isinstance(archive_res, str) and "无需更新" not in archive_res:
-                self.current_characters = re.sub(r'^(好的|明白|没问题|以下是).*?\n', '', archive_res,
-                                                 flags=re.IGNORECASE).strip().removeprefix("```json").removeprefix(
-                    "```").removesuffix("```").strip()
-                save_json(self.role_file, {"characters": self.current_characters})
+                clean_text = archive_res.replace("```json", "").replace("```", "").strip()
+                if clean_text:
+                    self.current_characters = clean_text
+                    save_json(self.role_file, {"characters": self.current_characters})
 
         write_file(os.path.join(VolumeManager.get_chapter_dir(self.book_title), f"{self.current_chapter}.txt"),
                    final_text)
@@ -1047,7 +879,6 @@ class AgentWorkflow:
         phint = f"主角是 {protagonist_name}，请用其真名。\n" if protagonist_name.strip() else ""
 
         while True:
-            # 移除了原有 <summary> 的包裹要求
             summaries = self._execute_parallel(int(self.config.get("compressor_count", 1)),
                                                int(self.config.get("compressor_count", 1)), self.call_llm, lambda i: (
                     f"设定：{self.current_characters}\n{phint}请提取剧情主线摘要。\n正文：\n{text}",
@@ -1057,7 +888,6 @@ class AgentWorkflow:
             best_sum, _, _ = self._evaluate_candidates(summaries, "打分(0-100)\n摘要：{content}", "评审者(压缩)")
             if best_sum == "_RETRY_": continue
 
-            # Tools 直出的文本，不需要正则表达式拦截匹配
             return str(best_sum).strip()
 
     def _step_compress_phase(self):
