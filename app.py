@@ -220,8 +220,8 @@ def build_ui():
         height: 72px !important;
     }
     """
-    with gr.Blocks(title="VibeNoving v0.5.0 nightly test version", theme=gr.themes.Soft(), css=custom_css) as demo:
-        gr.Markdown("## 📚 VibeNoving v0.5.0 nightly test version")
+    with gr.Blocks(title="VibeNoving v0.5.1 nightly test version", theme=gr.themes.Soft(), css=custom_css) as demo:
+        gr.Markdown("## 📚 VibeNoving v0.5.1 nightly test version")
 
         with gr.Tabs():
             with gr.TabItem("✍️ 剧情与设定输入"):
@@ -231,7 +231,7 @@ def build_ui():
                 load_book_msg = gr.Markdown("")
 
                 with gr.Row():
-                    outline = gr.Textbox(label="剧情总大纲", lines=5, scale=5)
+                    outline = gr.Textbox(label="自动大纲", lines=5, scale=5)
                     btn_outline = gr.UploadButton("📄 上传TXT", file_types=[".txt"], scale=1, size="sm")
                 with gr.Row():
                     style = gr.Textbox(label="剧情风格 (可选)", lines=3, scale=5)
@@ -267,6 +267,51 @@ def build_ui():
                                                        datatype=["number", "str", "str"], col_count=(3, "fixed"),
                                                        row_count=(1, "dynamic"), interactive=True, type="array")
                     btn_add_manual_row = gr.Button("➕ 新增一章大纲", size="sm")
+
+            with gr.TabItem("⚙️ 基础&全局API配置"):
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        global_prompt = gr.Textbox(label="全局提示词(对所有Agent都生效,可传入世界观)", lines=6)
+                        custom_style_prompt = gr.Textbox(label="自定义风格", lines=6)
+                    with gr.Column(scale=1):
+                        designer_use_manual_review = gr.Checkbox(
+                            label="设计者开启用户评审&修改(如果不开的话，每章都由评审者评审)", value=False)
+                        developer_use_manual_review = gr.Checkbox(
+                            label="开发者开启用户评审&修改(如果不开的话，每章都由评审者评审)", value=False)
+                        compressor_use_manual_review = gr.Checkbox(
+                            label="压缩者开启用户评审&修改(如果不开的话，每章都由评审者评审)", value=False)
+                        need_dev_revise = gr.Checkbox(label="开发者修改文本(暂不推荐开启)")
+                        use_archiver = gr.Checkbox(label="归档者更新人物(暂不推荐开启)")
+                        context_max_chars = gr.Number(label="前文最大截取字数(Agent读取的完整前文上限)", precision=0)
+                        vibenoving_context_count = gr.Number(label="局部重写前文参考章数(推荐5)", value=5,
+                                                             precision=0)
+
+                api_status_main = gr.Textbox(label="全局API获取状态", interactive=False)
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("### 【主 API 配置】")
+                        with gr.Row():
+                            api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="主 API 类型")
+                            api_keys = gr.Textbox(label="主 API Keys", type="password")
+                        with gr.Row():
+                            api_url = gr.Textbox(label="主 API URL")
+                            api_model = gr.Dropdown(label="主模型选择", allow_custom_value=True)
+                            btn_f_main = gr.Button("🔄 获取主模型")
+                        btn_f_main.click(fetch_models_ui, inputs=[api_type, api_url, api_keys],
+                                         outputs=[api_model, api_status_main])
+
+                    with gr.Column():
+                        gr.Markdown("### 【备用 API 配置】")
+                        with gr.Row():
+                            fallback_api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="备用 API 类型")
+                            fallback_api_keys = gr.Textbox(label="备用 API Keys", type="password")
+                        with gr.Row():
+                            fallback_api_url = gr.Textbox(label="备用 API URL")
+                            fallback_api_model = gr.Dropdown(label="备用模型选择", allow_custom_value=True)
+                            btn_f_fall = gr.Button("🔄 获取备用模型")
+                        btn_f_fall.click(fetch_models_ui,
+                                         inputs=[fallback_api_type, fallback_api_url, fallback_api_keys],
+                                         outputs=[fallback_api_model, api_status_main])
 
             with gr.TabItem("🤖 Agent 独立配置"):
                 agent_inputs_dict = {}
@@ -322,51 +367,6 @@ def build_ui():
                                                      "api_type": a_type, "api_keys": a_keys, "api_url": a_url,
                                                      "api_model": a_model}
 
-            with gr.TabItem("⚙️ 基础&全局API配置"):
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        global_prompt = gr.Textbox(label="全局提示词(对所有Agent都生效,可传入世界观)", lines=6)
-                        custom_style_prompt = gr.Textbox(label="自定义风格", lines=6)
-                    with gr.Column(scale=1):
-                        designer_use_manual_review = gr.Checkbox(
-                            label="设计者开启用户评审&修改(如果不开的话，每章都由评审者评审)", value=False)
-                        developer_use_manual_review = gr.Checkbox(
-                            label="开发者开启用户评审&修改(如果不开的话，每章都由评审者评审)", value=False)
-                        compressor_use_manual_review = gr.Checkbox(
-                            label="压缩者开启用户评审&修改(如果不开的话，每章都由评审者评审)", value=False)
-                        need_dev_revise = gr.Checkbox(label="开发者修改文本(暂不推荐开启)")
-                        use_archiver = gr.Checkbox(label="归档者更新人物(暂不推荐开启)")
-                        context_max_chars = gr.Number(label="前文最大截取字数(Agent读取的完整前文上限)", precision=0)
-                        vibenoving_context_count = gr.Number(label="局部重写前文参考章数(推荐5)", value=5,
-                                                             precision=0)
-
-                api_status_main = gr.Textbox(label="全局API获取状态", interactive=False)
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("### 【主 API 配置】")
-                        with gr.Row():
-                            api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="主 API 类型")
-                            api_keys = gr.Textbox(label="主 API Keys", type="password")
-                        with gr.Row():
-                            api_url = gr.Textbox(label="主 API URL")
-                            api_model = gr.Dropdown(label="主模型选择", allow_custom_value=True)
-                            btn_f_main = gr.Button("🔄 获取主模型")
-                        btn_f_main.click(fetch_models_ui, inputs=[api_type, api_url, api_keys],
-                                         outputs=[api_model, api_status_main])
-
-                    with gr.Column():
-                        gr.Markdown("### 【备用 API 配置】")
-                        with gr.Row():
-                            fallback_api_type = gr.Dropdown(["Gemini", "OpenAI Compatible"], label="备用 API 类型")
-                            fallback_api_keys = gr.Textbox(label="备用 API Keys", type="password")
-                        with gr.Row():
-                            fallback_api_url = gr.Textbox(label="备用 API URL")
-                            fallback_api_model = gr.Dropdown(label="备用模型选择", allow_custom_value=True)
-                            btn_f_fall = gr.Button("🔄 获取备用模型")
-                        btn_f_fall.click(fetch_models_ui,
-                                         inputs=[fallback_api_type, fallback_api_url, fallback_api_keys],
-                                         outputs=[fallback_api_model, api_status_main])
-
             with gr.TabItem("💻 控制台 & 日志"):
                 with gr.Row():
                     btn_start = gr.Button("▶ 开始", variant="primary")
@@ -399,7 +399,7 @@ def build_ui():
                 btn_refresh, book_select = gr.Button("🔄 刷新"), gr.Dropdown(label="小说")
                 with gr.Row():
                     btn_open_folder = gr.Button("📂 打开本地小说保存文件夹", variant="primary")
-                fm_msg = gr.Textbox(label="状态")
+                # 已删除冗余的 fm_msg = gr.Textbox(label="状态")
 
                 gr.Markdown("--- \n ### 📝 本地章节内容覆写")
                 with gr.Row():
@@ -428,6 +428,15 @@ def build_ui():
                         import_protagonist = gr.Textbox(label="主角姓名(可选，用于第一人称小说，不然AI不知道主角的名字)")
                         import_btn = gr.Button("🚀 开始处理", variant="primary")
                 import_status = gr.Textbox(label="导入进度状态", lines=5)
+
+            with gr.TabItem("🛠️ 其它设置"):
+                gr.Markdown("### 🛠️ 软件更新与外观")
+                with gr.Row():
+                    btn_toggle_theme = gr.Button("🌓 切换白天/黑夜模式")
+                    btn_check_update = gr.Button("🚀 获取更新", variant="primary")
+
+                gr.Markdown("💡如果获取更新的网盘链接失效，或者有bug&需求，请email e1351599@u.nus.edu")
+
         # ---------------------------
         # 收集变量 (与BASE_CONFIG_KEYS完全一致顺序)
         # ---------------------------
@@ -509,7 +518,13 @@ def build_ui():
                                   outputs=[edit_ch_cont])
 
         btn_refresh.click(get_books_ui, inputs=[], outputs=[book_select])
-        btn_open_folder.click(backend.FileManager.open_books_folder, inputs=[], outputs=[fm_msg])
+
+        # 将原有的文字框提示改为 Gradio 原生的 Info 弹窗提示，避免占用界面空间
+        btn_open_folder.click(
+            lambda: gr.Info(backend.FileManager.open_books_folder()) if hasattr(gr,
+                                                                                "Info") else backend.FileManager.open_books_folder(),
+            inputs=[], outputs=[]
+        )
 
         import_file.upload(lambda f: os.path.splitext(os.path.basename(f.name))[0] if f else "", inputs=[import_file],
                            outputs=[import_title])
@@ -522,6 +537,33 @@ def build_ui():
                           outputs=[edit_ch_cont, edit_ch_sum, edit_status])
         btn_save_ch.click(save_chapter_ui, inputs=[book_select, edit_chapter_select, edit_ch_cont] + all_inputs,
                           outputs=[edit_ch_sum, edit_status])
+
+        # 其它功能页签
+        btn_toggle_theme.click(None, None, None, js="""
+            () => {
+                const isDark = document.body.classList.contains('dark') || document.documentElement.classList.contains('dark');
+                if (isDark) {
+                    document.body.classList.remove('dark');
+                    document.documentElement.classList.remove('dark');
+                    localStorage.setItem('color-theme', 'light');
+                    const ga = document.querySelector('gradio-app');
+                    if (ga) ga.classList.remove('dark');
+                } else {
+                    document.body.classList.add('dark');
+                    document.documentElement.classList.add('dark');
+                    localStorage.setItem('color-theme', 'dark');
+                    const ga = document.querySelector('gradio-app');
+                    if (ga) ga.classList.add('dark');
+                }
+            }
+        """)
+
+        btn_check_update.click(None, None, None, js="""
+            () => {
+                alert("即将为您跳转到百度网盘。\\n\\n如果链接失效，请B站搜索【YilEnS】获取新版本！");
+                window.open("https://pan.baidu.com/s/1CFYTv0ChRtVigOwdT57hpg?pwd=7891", "_blank");
+            }
+        """)
 
         demo.load(None, inputs=None, outputs=None,
                   js='''() => { alert("温馨提示：这是一个内测版本，功能尚在完善中，禁止倒卖软件用于盈利。有问题请发送邮件至e1351599@u.nus.edu"); }''')
