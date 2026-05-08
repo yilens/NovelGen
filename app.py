@@ -24,6 +24,15 @@ def get_roles_ui():
     return update_choices(backend.FileManager._get_list("roles"))
 
 
+def refresh_file_manager_ui(book_name):
+    # 刷新文件管理页面的书籍列表和章节下拉框
+    books = backend.FileManager.get_books()
+    b_update = update_choices(books)
+    curr_book = book_name if book_name in books else (books[0] if books else None)
+    ch_update = update_choices(backend.EditManager.get_generated_chapters(curr_book))
+    return b_update, ch_update, gr.update(value=""), gr.update(value=""), "✅ 刷新完成"
+
+
 def save_mode_ui(mode_name, sys_prompt, intro, history_data):
     msg, modes = backend.ModeManager.save_mode(mode_name, sys_prompt, intro, history_data)
     updates = [gr.update(choices=modes) for _ in range(len(backend.AGENT_NAMES_MAP))]
@@ -165,6 +174,16 @@ def on_review_choice_change(choice):
         return backend.app_state.pending_candidates[0]
 
 
+# 响应文本实时修改：防止局部重写或手动修改后切换时丢失
+def on_review_text_change(choice, text):
+    if not choice or not backend.app_state.pending_candidates: return
+    try:
+        idx = int(choice.split(" ")[1]) - 1
+        backend.app_state.pending_candidates[idx] = text
+    except:
+        pass
+
+
 # 提交人工评审修改
 def submit_manual_review(choice, text):
     if not choice:
@@ -220,8 +239,8 @@ def build_ui():
         height: 72px !important;
     }
     """
-    with gr.Blocks(title="VibeNoving v0.5.1 nightly test version", theme=gr.themes.Soft(), css=custom_css) as demo:
-        gr.Markdown("## 📚 VibeNoving v0.5.1 nightly test version")
+    with gr.Blocks(title="VibeNoving v0.5.2 nightly test version", theme=gr.themes.Soft(), css=custom_css) as demo:
+        gr.Markdown("## 📚 VibeNoving v0.5.2 nightly test version")
 
         with gr.Tabs():
             with gr.TabItem("✍️ 剧情与设定输入"):
@@ -399,7 +418,6 @@ def build_ui():
                 btn_refresh, book_select = gr.Button("🔄 刷新"), gr.Dropdown(label="小说")
                 with gr.Row():
                     btn_open_folder = gr.Button("📂 打开本地小说保存文件夹", variant="primary")
-                # 已删除冗余的 fm_msg = gr.Textbox(label="状态")
 
                 gr.Markdown("--- \n ### 📝 本地章节内容覆写")
                 with gr.Row():
@@ -472,8 +490,10 @@ def build_ui():
         btn_save_mode.click(save_mode_ui, inputs=[new_mode_name, new_mode_sys, new_mode_intro, new_mode_history],
                             outputs=[mode_save_msg] + [agent_inputs_dict[en]["mode"] for _, en, _ in
                                                        backend.AGENT_NAMES_MAP])
+
+        # 保存配置脱离队列立刻响应
         btn_save_conf.click(lambda *args: backend.save_config_json(backend.build_config_dict(*args)), inputs=all_inputs,
-                            outputs=[sys_msg])
+                            outputs=[sys_msg], queue=False)
 
         btn_save_outline.click(lambda n, d: (msg := backend.FileManager._save_json_ui("outline", n, d, "大纲")[0],
                                              get_manual_outlines_ui()), inputs=[outline_save_name, manual_outline_data],
@@ -498,14 +518,16 @@ def build_ui():
 
         btn_start.click(start_generation_ui, inputs=all_inputs,
                         outputs=[log_output, btn_pause, review_panel, review_type_msg, review_choices, review_text])
-        # 传入所有输入到暂停按钮中，供恢复时动态读取
-        btn_pause.click(toggle_pause_ui, inputs=all_inputs, outputs=[btn_pause, sys_msg])
 
-        # 人工评审相关事件绑定
+        # 将暂停/继续按钮设为 queue=False，不受 start 长轮询的队列阻塞影响
+        btn_pause.click(toggle_pause_ui, inputs=all_inputs, outputs=[btn_pause, sys_msg], queue=False)
+
+        # 人工评审相关事件绑定，加入文本实时保存及脱离队列
         review_choices.change(on_review_choice_change, inputs=[review_choices], outputs=[review_text])
+        review_text.change(on_review_text_change, inputs=[review_choices, review_text], outputs=[])
         btn_review_submit.click(submit_manual_review, inputs=[review_choices, review_text],
-                                outputs=[review_panel, sys_msg])
-        btn_review_retry.click(submit_manual_retry, inputs=[], outputs=[review_panel, sys_msg])
+                                outputs=[review_panel, sys_msg], queue=False)
+        btn_review_retry.click(submit_manual_retry, inputs=[], outputs=[review_panel, sys_msg], queue=False)
 
         # 局部重写 事件绑定
         btn_vibe_gen.click(run_vibe_review, inputs=[review_text, vibe_selected, vibe_prompt] + all_inputs,
@@ -517,9 +539,10 @@ def build_ui():
         btn_vibe_edit_apply.click(apply_vibe, inputs=[edit_ch_cont, vibe_edit_selected, vibe_edit_result],
                                   outputs=[edit_ch_cont])
 
-        btn_refresh.click(get_books_ui, inputs=[], outputs=[book_select])
+        # 文件管理：增强刷新和自动读取联动
+        btn_refresh.click(refresh_file_manager_ui, inputs=[book_select],
+                          outputs=[book_select, edit_chapter_select, edit_ch_cont, edit_ch_sum, edit_status])
 
-        # 将原有的文字框提示改为 Gradio 原生的 Info 弹窗提示，避免占用界面空间
         btn_open_folder.click(
             lambda: gr.Info(backend.FileManager.open_books_folder()) if hasattr(gr,
                                                                                 "Info") else backend.FileManager.open_books_folder(),
@@ -533,6 +556,10 @@ def build_ui():
 
         book_select.change(lambda r: update_choices(backend.EditManager.get_generated_chapters(r)),
                            inputs=[book_select], outputs=[edit_chapter_select])
+
+        # 当下拉框改变时，直接自动读取内容
+        edit_chapter_select.change(backend.EditManager.load_chapter, inputs=[book_select, edit_chapter_select],
+                                   outputs=[edit_ch_cont, edit_ch_sum, edit_status])
         btn_load_ch.click(backend.EditManager.load_chapter, inputs=[book_select, edit_chapter_select],
                           outputs=[edit_ch_cont, edit_ch_sum, edit_status])
         btn_save_ch.click(save_chapter_ui, inputs=[book_select, edit_chapter_select, edit_ch_cont] + all_inputs,

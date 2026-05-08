@@ -3,9 +3,9 @@
 
 import json, os, re, time, shutil, threading, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
-import mode   # Agent配置文件
+import mode  # Agent配置文件
 import tools  # 工具层
-import api    # API网络层
+import api  # API网络层
 
 # ==========================================
 # 常量配置与全局初始化
@@ -256,7 +256,8 @@ class ImportManager:
         m = re.search(r'第([零一二三四五六七八九十百千万〇]+)[章节回]', title_str)
         if m:
             cn_num = m.group(1)
-            cn2arb = {'零': 0, '〇': 0, '一': 1, '两': 2, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+            cn2arb = {'零': 0, '〇': 0, '一': 1, '两': 2, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8,
+                      '九': 9}
             result, temp = 0, 0
             for char in cn_num:
                 if char in cn2arb:
@@ -480,10 +481,10 @@ class EditManager:
             api_key = km.get_next_key(api_keys)
             if api_type == "Gemini":
                 res = api.LLMService.call_gemini(api_key, api_model, sys_prompt, llm_prompt,
-                                             "收到，我将仅返回修改后的文本段落。", [], "", 0.7, 0.9, 40)
+                                                 "收到，我将仅返回修改后的文本段落。", [], "", 0.7, 0.9, 40)
             else:
                 res = api.LLMService.call_openai(api_key, api_url, api_model, sys_prompt, llm_prompt,
-                                             "收到，我将仅返回修改后的文本段落。", [], "", 0.7, 0.9)
+                                                 "收到，我将仅返回修改后的文本段落。", [], "", 0.7, 0.9)
             return str(res).strip()
         except Exception as e:
             return f"❌ VibeNoving 生成失败: {e}"
@@ -569,12 +570,26 @@ class AgentWorkflow:
         start_full = self.current_chapter - actual_full
 
         history_parts, summary_parts, full_parts = [], [], []
+
+        # 修复老缓存问题：拼接前文时优先强行读取最新的本地文件，防止工作流内存不同步
+        sum_dir = VolumeManager.get_summary_dir(self.book_title)
         for i in range(1, start_full):
-            if i in self.summary_texts: summary_parts.append(f"第{i}章剧情：{self.summary_texts[i]}")
+            sf = os.path.join(sum_dir, f"{i}.txt")
+            if os.path.exists(sf):
+                summary_parts.append(f"第{i}章剧情：{read_file(sf)}")
+            elif i in self.summary_texts:
+                summary_parts.append(f"第{i}章剧情：{self.summary_texts[i]}")
+
         if summary_parts: history_parts.append("【前文剧情摘要】\n" + "\n".join(summary_parts))
 
+        ch_dir = VolumeManager.get_chapter_dir(self.book_title)
         for i in range(start_full, self.current_chapter):
-            if i in self.chapter_texts: full_parts.append(f"第{i}章\n{self.chapter_texts[i]}")
+            cf = os.path.join(ch_dir, f"{i}.txt")
+            if os.path.exists(cf):
+                full_parts.append(f"第{i}章\n{read_file(cf)}")
+            elif i in self.chapter_texts:
+                full_parts.append(f"第{i}章\n{self.chapter_texts[i]}")
+
         if full_parts: history_parts.append("【前文完整剧情内容】\n" + "\n\n".join(full_parts))
 
         full_history = "\n\n".join(history_parts)
@@ -656,8 +671,18 @@ class AgentWorkflow:
         conf = self._get_api_config(use_fallback, role)
         self.log(f"[{role}] {conf['log_prefix']}思考中... ({conf['model_name']})")
 
+        # --- 新增/修复逻辑：将全局提示词和人物设定进行高权重全局注入 ---
         global_p = self.config.get("global_prompt", "").strip()
-        b_prompt = f"\n{global_p}\n\n【任务】：\n{prompt}" if global_p else prompt
+        ctx_parts = []
+        if global_p:
+            ctx_parts.append(f"【全局世界观与提示】\n{global_p}")
+        if hasattr(self, 'current_characters') and self.current_characters.strip():
+            ctx_parts.append(f"【当前人物与背景设定】\n{self.current_characters.strip()}")
+
+        ctx_text = "\n\n".join(ctx_parts)
+        b_prompt = f"{ctx_text}\n\n【当前任务】\n{prompt}" if ctx_text else f"【当前任务】\n{prompt}"
+        # --------------------------------------------------------
+
         is_tool, sys_inst, model_intro, pre_history = self._build_system_instructions(role)
 
         b_role = role.split()[0].split('(')[0] if role else ""
@@ -678,12 +703,13 @@ class AgentWorkflow:
 
                 if conf["api_type"] == "Gemini":
                     result = api.LLMService.call_gemini(api_key, conf["model_name"], sys_inst, curr_prompt, model_intro,
-                                                    pre_history, history_text, temperature, top_p, top_k,
-                                                    role_key=en_role)
+                                                        pre_history, history_text, temperature, top_p, top_k,
+                                                        role_key=en_role)
                 else:
-                    result = api.LLMService.call_openai(api_key, conf["api_url"], conf["model_name"], sys_inst, curr_prompt,
-                                                    model_intro, pre_history, history_text, temperature, top_p,
-                                                    role_key=en_role)
+                    result = api.LLMService.call_openai(api_key, conf["api_url"], conf["model_name"], sys_inst,
+                                                        curr_prompt,
+                                                        model_intro, pre_history, history_text, temperature, top_p,
+                                                        role_key=en_role)
 
                 # 判断为空的宽容处理（应对Tool返回的字典或数字结果）
                 if result is None or (isinstance(result, str) and not result): raise ValueError("API返回空内容")
@@ -804,9 +830,21 @@ class AgentWorkflow:
 
         # 利用 while 循环支持用户反复重试本环节
         while True:
+            # 优化了大纲和风格的排版，人物设定已交由 call_llm 全局注入
+            outline_text = self.config.get('outline', '').strip()
+            style_text = self.config.get('style', '').strip()
+
+            task_prompt = ""
+            if outline_text:
+                task_prompt += f"【小说总大纲】\n{outline_text}\n\n"
+            if style_text:
+                task_prompt += f"【期望风格】\n{style_text}\n\n"
+
+            task_prompt += f"请结合以上信息与前文，**仅为第{self.current_chapter}章**制定简短精炼的剧情计划。"
+
             plans = self._execute_parallel(int(self.config.get("designer_count", 1)),
                                            int(self.config.get("designer_count", 1)), self.call_llm, lambda i: (
-                    f"大纲：{self.config.get('outline', '')}。风格：{self.config.get('style', '')}。人物：{self.current_characters}。\n**仅为第{self.current_chapter}章**制定简短精炼计划。",
+                    task_prompt,
                     f"设计者 {i + 1}", False, hist_ctx))
             if not plans or not self.is_running: return False
             self.best_plan, _, _ = self._evaluate_candidates(plans, "打分(0-100)，输出'分数: X'\n计划：{content}",
@@ -821,10 +859,10 @@ class AgentWorkflow:
             "developer_use_history", True) else ""
 
         while True:
-            # 移除了原有的 <text> 包裹要求，底层 Function Calling 机制将直接获取结果
+            # 修复核心问题：给开发者注入前置设定要求，配合 call_llm 中的高权重人物列表注入
             chapters = self._execute_parallel(int(self.config.get("developer_count", 1)),
                                               int(self.config.get("developer_count", 1)), self.call_llm, lambda i: (
-                    f"根据计划编写第{self.current_chapter}章正文(>2000字)。\n计划：{self.best_plan}\n",
+                    f"请根据以下计划编写第{self.current_chapter}章正文(建议2000字以上)。请务必遵循人物设定与前文逻辑。\n\n【本章计划】：\n{self.best_plan}\n",
                     f"开发者 {i + 1}", False, hist_ctx))
             if not chapters or not self.is_running: return False
 
@@ -852,11 +890,12 @@ class AgentWorkflow:
             a_hist = self._build_dynamic_history(int(self.config.get("archiver_full_ctx_count", 0))) if self.config.get(
                 "archiver_use_history", False) else ""
             archive_res = self.call_llm(
-                f"分析正文是否有人物变化，无则输出【无需更新】，有则在原有格式增补。\n设定：{self.current_characters}\n正文：{final_text}",
+                f"对比全局【当前人物与背景设定】，分析以下正文是否导致了人物状态变化或新人物登场。无则输出【无需更新】，有则在原有格式上增补并输出最新设定。\n\n【本章正文】：\n{final_text}",
                 "归档者", False, a_hist)
 
             if isinstance(archive_res, dict):
-                if archive_res.get("status") in ["需要更新", "更新", "有变化"] and archive_res.get("updated_characters"):
+                if archive_res.get("status") in ["需要更新", "更新", "有变化"] and archive_res.get(
+                        "updated_characters"):
                     self.current_characters = archive_res["updated_characters"]
                     save_json(self.role_file, {"characters": self.current_characters})
             elif isinstance(archive_res, str) and "无需更新" not in archive_res:
@@ -881,7 +920,7 @@ class AgentWorkflow:
         while True:
             summaries = self._execute_parallel(int(self.config.get("compressor_count", 1)),
                                                int(self.config.get("compressor_count", 1)), self.call_llm, lambda i: (
-                    f"设定：{self.current_characters}\n{phint}请提取剧情主线摘要。\n正文：\n{text}",
+                    f"{phint}请提取以下正文的剧情主线摘要。\n\n【正文】：\n{text}",
                     f"压缩者 {i + 1}", False, hist_ctx))
             if not summaries or not self.is_running: return None
 
